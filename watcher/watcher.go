@@ -51,6 +51,10 @@ type Watcher struct {
 
 	// Error callback
 	errorHandler func(error)
+
+	// Event callback - called after successful batch processing
+	// Arguments: eventType ("new" or "delete"), count
+	eventCallback func(eventType string, count int)
 }
 
 // batchItem is an internal item in the batch channel.
@@ -87,6 +91,14 @@ func WithVerbose(v bool) Option {
 func WithErrorHandler(handler func(error)) Option {
 	return func(w *Watcher) {
 		w.errorHandler = handler
+	}
+}
+
+// WithEventCallback sets a callback for tracking processed events.
+// The callback is called after each successful batch flush with the event type and count.
+func WithEventCallback(callback func(eventType string, count int)) Option {
+	return func(w *Watcher) {
+		w.eventCallback = callback
 	}
 }
 
@@ -381,6 +393,20 @@ func (w *Watcher) flushBatch() {
 	if err := w.recent.BatchUpdate(deduped); err != nil {
 		if w.errorHandler != nil {
 			w.errorHandler(fmt.Errorf("batch update failed: %w", err))
+		}
+		return // Don't call event callback on error
+	}
+
+	// Call event callback if registered
+	if w.eventCallback != nil {
+		// Count events by type
+		counts := make(map[string]int)
+		for _, item := range deduped {
+			counts[item.Type]++
+		}
+
+		for eventType, count := range counts {
+			w.eventCallback(eventType, count)
 		}
 	}
 

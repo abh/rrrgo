@@ -211,6 +211,9 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 		watcher.WithErrorHandler(func(err error) {
 			log.Error("watcher error", "error", err)
 		}),
+		watcher.WithEventCallback(func(eventType string, count int) {
+			eventsProcessed.WithLabelValues(eventType).Add(float64(count))
+		}),
 	)
 	if err != nil {
 		return fmt.Errorf("create watcher: %w", err)
