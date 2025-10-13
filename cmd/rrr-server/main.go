@@ -158,6 +158,14 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 		eventsInQueue,
 	)
 
+	// Register build_info metric
+	version.RegisterMetric("rrr", metricsSrv.Registry())
+
+	// Initialize eventsProcessed metric with zero values for all label types
+	// This ensures the metric appears in /metrics even before any events are processed
+	eventsProcessed.WithLabelValues("new").Add(0)
+	eventsProcessed.WithLabelValues("delete").Add(0)
+
 	go func() {
 		log.Info("metrics server starting", "port", cli.MetricsPort)
 		if err := metricsSrv.ListenAndServe(ctx, cli.MetricsPort); err != nil {

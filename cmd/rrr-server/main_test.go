@@ -5,9 +5,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"go.ntppool.org/common/metricsserver"
+	"go.ntppool.org/common/version"
 )
 
 func TestServerIntegration(t *testing.T) {
@@ -284,5 +288,42 @@ func TestCreateOrLoadRecentYAMLDefault(t *testing.T) {
 	principalPath := filepath.Join(tmpDir, "RECENT-1h.yaml")
 	if _, err := os.Stat(principalPath); err != nil {
 		t.Errorf("principal YAML file not created: %v", err)
+	}
+}
+
+func TestBuildInfoMetric(t *testing.T) {
+	// Create a metrics server with custom registry
+	metricsSrv := metricsserver.New()
+
+	// Register build_info metric
+	version.RegisterMetric("rrr", metricsSrv.Registry())
+
+	// Gather metrics from registry
+	metricFamilies, err := metricsSrv.Registry().Gather()
+	if err != nil {
+		t.Fatalf("failed to gather metrics: %v", err)
+	}
+
+	// Check if rrr_build_info metric is present
+	found := false
+	var buildInfoMetric string
+	for _, mf := range metricFamilies {
+		if mf.GetName() == "rrr_build_info" {
+			found = true
+			buildInfoMetric = mf.String()
+			break
+		}
+	}
+
+	if !found {
+		t.Error("rrr_build_info metric not found in registry")
+	}
+
+	// Verify the metric has expected labels
+	expectedLabels := []string{"version", "buildtime", "gittime", "git"}
+	for _, label := range expectedLabels {
+		if !strings.Contains(buildInfoMetric, label) {
+			t.Errorf("rrr_build_info metric missing expected label: %s", label)
+		}
 	}
 }
