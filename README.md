@@ -24,6 +24,18 @@ go build ./cmd/rrr-server
 go build ./cmd/rrr-fsck
 ```
 
+### Docker
+
+Pre-built Docker images are available at https://github.com/abh/rrrgo/pkgs/container/rrrgo
+
+```bash
+# Latest development build
+docker pull ghcr.io/abh/rrrgo:main
+
+# Latest release build
+docker pull ghcr.io/abh/rrrgo:latest
+```
+
 ## Usage
 
 ### rrr-server
@@ -31,11 +43,25 @@ go build ./cmd/rrr-fsck
 Watch a directory tree and continuously update index files:
 
 ```bash
-./rrr-server /path/to/RECENT.recent
+./rrr-server <local-root>
 ```
 
+Arguments:
+- `<local-root>`: Local root directory to watch
+
 Options:
-- `-v, --verbose`: Increase verbosity (can be repeated)
+- `-i, --interval`: Principal recentfile interval (default: "1h", e.g., 30m, 1h, 6h)
+- `-a, --aggregator`: Aggregator intervals (e.g., 6h,1d,1W). Can be specified multiple times
+- `-f, --format`: Serialization format - yaml or json (default: "yaml")
+- `--batch-size`: Maximum batch size before flushing events (default: 1000)
+- `--batch-delay`: Maximum delay before flushing events (default: 1s)
+- `--aggregate-interval`: How often to run aggregation (default: 5m)
+- `--metrics-port`: Port for metrics server (default: 9090)
+- `--log-level`: Log level - debug, info, warn, error (default: "info")
+- `--skip-fsck`: Skip startup integrity check
+- `--fsck-repair`: Auto-repair issues found during startup fsck
+- `-v, --verbose`: Enable verbose logging
+- `-V, --version`: Show version
 - `-h, --help`: Show help
 
 ### rrr-fsck
@@ -43,23 +69,27 @@ Options:
 Check consistency between disk and index:
 
 ```bash
-./rrr-fsck /path/to/RECENT.recent
+./rrr-fsck <principal-file>
 ```
 
+Arguments:
+- `<principal-file>`: Path to principal RECENT file (e.g., RECENT-1h.yaml)
+
 Options:
-- `-n, --dry-run`: Show what would be done without making changes
-- `--remoteroot=URL`: Fetch missing files from remote
-- `-v, --verbose`: Increase verbosity
-- `-y, --yes`: Answer yes to all prompts
+- `-r, --repair`: Repair issues found (otherwise just report)
+- `--skip-events`: Skip parsing events (faster, less thorough)
+- `-v, --verbose`: Enable verbose logging
+- `-V, --version`: Show version
+- `-h, --help`: Show help
 
 ## Architecture
 
-- `pkg/recentfile`: Core RECENT file handling, serialization, locking
-- `pkg/recent`: Collection manager for multiple recentfiles
-- `pkg/watcher`: File system watching with fsnotify
-- `pkg/rsync`: Rsync command wrapper
-- `cmd/rrr-server`: Server daemon
-- `cmd/rrr-fsck`: Consistency checker
+- `recentfile/`: Core RECENT file handling, serialization, locking
+- `recent/`: Collection manager for multiple recentfiles
+- `watcher/`: File system watching with fsnotify
+- `fsck/`: Consistency checking functionality
+- `cmd/rrr-server/`: Server daemon
+- `cmd/rrr-fsck/`: Consistency checker tool
 
 ## Compatibility
 
