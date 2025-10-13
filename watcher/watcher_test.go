@@ -558,22 +558,27 @@ func TestIgnoreTemporaryFiles(t *testing.T) {
 	defer w.Stop()
 
 	// Create temporary files that should be ignored
-	tempFiles := []string{
-		".FRMRecent-RECENT-1h.yaml-bVoi.yaml", // Dot prefix - Perl temp file
-		".02STAMP.IMOhgo",                     // Dot prefix - temp stamp
+	ignoredFiles := []string{
+		".FRMRecent-RECENT-1h.yaml-bVoi.yaml", // .FRMRecent prefix
 		"RECENT.recent.tmp",                   // .tmp suffix
-		".hidden.txt",                         // Any dot prefix
 	}
 
-	// Create normal file that should NOT be ignored
-	normalFile := "data.txt"
+	// Create normal files that should NOT be ignored
+	normalFiles := []string{
+		"data.txt",
+		".02STAMP.IMOhgo", // Dot prefix but not .FRMRecent
+		".hidden.txt",     // Dot prefix but not .FRMRecent
+	}
 
 	// Create all files
-	for _, name := range tempFiles {
+	for _, name := range ignoredFiles {
 		path := filepath.Join(tmpDir, name)
 		os.WriteFile(path, []byte("test"), 0o644)
 	}
-	os.WriteFile(filepath.Join(tmpDir, normalFile), []byte("test"), 0o644)
+	for _, name := range normalFiles {
+		path := filepath.Join(tmpDir, name)
+		os.WriteFile(path, []byte("test"), 0o644)
+	}
 
 	// Wait and flush
 	time.Sleep(200 * time.Millisecond)
@@ -581,16 +586,20 @@ func TestIgnoreTemporaryFiles(t *testing.T) {
 
 	events := rec.PrincipalRecentfile().RecentEvents()
 
-	// Should have only 1 event (the normal file)
-	if len(events) != 1 {
-		t.Errorf("Expected 1 event (normal file only), got %d", len(events))
+	// Should have events for normal files only
+	if len(events) != len(normalFiles) {
+		t.Errorf("Expected %d events (normal files only), got %d", len(normalFiles), len(events))
 		for _, e := range events {
 			t.Logf("  Event: %s (%s)", e.Path, e.Type)
 		}
 	}
 
-	// Verify the normal file was recorded
-	if len(events) > 0 && events[0].Path != normalFile {
-		t.Errorf("Event path = %s, want %s", events[0].Path, normalFile)
+	// Verify no ignored files were recorded
+	for _, e := range events {
+		for _, ignored := range ignoredFiles {
+			if e.Path == ignored {
+				t.Errorf("Ignored file %s was recorded", ignored)
+			}
+		}
 	}
 }

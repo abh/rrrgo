@@ -126,7 +126,15 @@ func (rf *Recentfile) checkStaleLock(lockDir string) (bool, error) {
 
 	// Parse PID
 	pidStr := string(data)
-	pid, err := strconv.Atoi(pidStr[:len(pidStr)-1]) // Remove newline
+	if len(pidStr) == 0 {
+		// Empty PID file, consider it stale
+		return true, nil
+	}
+	// Remove trailing newline if present
+	if pidStr[len(pidStr)-1] == '\n' {
+		pidStr = pidStr[:len(pidStr)-1]
+	}
+	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
 		// Invalid PID, consider it stale
 		return true, nil
