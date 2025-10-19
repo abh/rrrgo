@@ -241,6 +241,15 @@ func (rf *Recentfile) RecentEvents() []Event {
 	return events
 }
 
+// SetRecentEvents replaces the events slice.
+// Used by repair operations to update epochs.
+func (rf *Recentfile) SetRecentEvents(events []Event) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.recent = make([]Event, len(events))
+	copy(rf.recent, events)
+}
+
 // Interval parsing constants
 const (
 	SecondSeconds  int64 = 1

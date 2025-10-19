@@ -195,7 +195,7 @@ func (rf *Recentfile) MergeFrom(source *Recentfile) error {
 	rf.sortEventsByEpoch(newRecent)
 
 	// Handle epoch conflicts (very rare)
-	newRecent = rf.deduplicateEpochs(newRecent)
+	newRecent = rf.DeduplicateEpochs(newRecent)
 
 	// Truncate old events
 	rf.recent = rf.truncate(newRecent)
@@ -214,9 +214,9 @@ func (rf *Recentfile) MergeFrom(source *Recentfile) error {
 	return nil
 }
 
-// deduplicateEpochs ensures all events have unique epochs.
+// DeduplicateEpochs ensures all events have unique epochs.
 // If duplicates are found, increments them slightly.
-func (rf *Recentfile) deduplicateEpochs(events []Event) []Event {
+func (rf *Recentfile) DeduplicateEpochs(events []Event) []Event {
 	if len(events) <= 1 {
 		return events
 	}

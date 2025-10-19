@@ -9,17 +9,19 @@ import (
 
 // Options controls fsck behavior.
 type Options struct {
-	Repair     bool          // Auto-repair issues found
-	SkipEvents bool          // Skip event parsing (faster, less thorough)
-	Verbose    bool          // Detailed output
-	Logger     *slog.Logger  // Required for all output
+	Repair     bool         // Auto-repair issues found
+	SkipEvents bool         // Skip event parsing (faster, less thorough)
+	Verbose    bool         // Detailed output
+	Logger     *slog.Logger // Required for all output
 }
 
 // Result contains fsck findings.
 type Result struct {
-	Issues      int            // Total issues found
-	IssuesFound map[string]int // Issues per check type
-	Repaired    bool           // Whether repair was attempted
+	Issues             int            // Total issues found
+	IssuesFound        map[string]int // Issues per check type
+	Repaired           bool           // Whether repair was attempted
+	EpochsQuantized    int            // Number of epochs quantized during repair
+	EpochsDeduplicated int            // Number of epoch collisions fixed during repair
 }
 
 // Run performs fsck on a Recent collection.
@@ -90,11 +92,14 @@ func Run(rec *recent.Recent, opts Options) (*Result, error) {
 	if result.Issues > 0 && opts.Repair {
 		opts.Logger.Info("attempting to repair issues", "count", result.Issues)
 
-		if err := repairIssues(rec, opts); err != nil {
+		quantized, deduplicated, err := repairIssues(rec, opts)
+		if err != nil {
 			return result, fmt.Errorf("repair failed: %w", err)
 		}
 
 		result.Repaired = true
+		result.EpochsQuantized = quantized
+		result.EpochsDeduplicated = deduplicated
 		opts.Logger.Info("repair complete")
 	}
 

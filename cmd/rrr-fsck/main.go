@@ -109,6 +109,15 @@ func run(cli *CLI) error {
 		if cli.Repair {
 			if result.Repaired {
 				fmt.Println("✓ Repair complete")
+				if result.EpochsQuantized > 0 || result.EpochsDeduplicated > 0 {
+					fmt.Println("\nEpoch repairs:")
+					if result.EpochsQuantized > 0 {
+						fmt.Printf("  • Quantized %d epochs to 10µs precision\n", result.EpochsQuantized)
+					}
+					if result.EpochsDeduplicated > 0 {
+						fmt.Printf("  • Fixed %d epoch collisions\n", result.EpochsDeduplicated)
+					}
+				}
 			} else {
 				return fmt.Errorf("repair was requested but not completed")
 			}

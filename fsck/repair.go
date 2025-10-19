@@ -10,14 +10,15 @@ import (
 )
 
 // repairIssues attempts to fix issues found during validation.
-func repairIssues(rec *recent.Recent, opts Options) error {
+// Returns epoch repair statistics: (epochsQuantized, epochsDeduplicated, error)
+func repairIssues(rec *recent.Recent, opts Options) (int, int, error) {
 	// Ensure all files exist
 	if opts.Verbose {
 		opts.Logger.Debug("ensuring all recentfiles exist")
 	}
 
 	if err := rec.EnsureFilesExist(); err != nil {
-		return fmt.Errorf("ensure files exist: %w", err)
+		return 0, 0, fmt.Errorf("ensure files exist: %w", err)
 	}
 
 	if opts.Verbose {
@@ -26,15 +27,113 @@ func repairIssues(rec *recent.Recent, opts Options) error {
 
 	// Repair disk→index mismatches (files on disk but not in index)
 	if err := repairIndexOrphans(rec, opts); err != nil {
-		return err
+		return 0, 0, err
 	}
 
 	// Repair index→disk mismatches (files in index but not on disk)
 	if err := repairIndexMismatches(rec, opts); err != nil {
-		return err
+		return 0, 0, err
 	}
 
-	return nil
+	// Repair epochs (quantize to 10µs and deduplicate)
+	quantized, deduplicated, err := repairEpochs(rec, opts)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return quantized, deduplicated, nil
+}
+
+// repairEpochs quantizes epochs to 10µs precision and deduplicates collisions.
+// Returns statistics about epochs quantized and collisions fixed.
+func repairEpochs(rec *recent.Recent, opts Options) (quantized int, deduplicated int, err error) {
+	if opts.Verbose {
+		opts.Logger.Debug("quantizing and deduplicating epochs in all RECENT files")
+	}
+
+	recentfiles := rec.Recentfiles()
+	for _, rf := range recentfiles {
+		q, d, err := repairEpochsInFile(rf, opts)
+		if err != nil {
+			return quantized, deduplicated, fmt.Errorf("repair epochs in %s: %w", filepath.Base(rf.Rfile()), err)
+		}
+		quantized += q
+		deduplicated += d
+
+		if opts.Verbose && (q > 0 || d > 0) {
+			opts.Logger.Debug("repaired epochs in file",
+				"file", filepath.Base(rf.Rfile()),
+				"quantized", q,
+				"deduplicated", d,
+			)
+		}
+	}
+
+	if quantized > 0 || deduplicated > 0 {
+		opts.Logger.Info("epoch repair complete",
+			"total_quantized", quantized,
+			"total_deduplicated", deduplicated,
+		)
+	} else if opts.Verbose {
+		opts.Logger.Debug("no epochs needed repair")
+	}
+
+	return quantized, deduplicated, nil
+}
+
+// repairEpochsInFile quantizes and deduplicates epochs in a single recentfile.
+func repairEpochsInFile(rf *recentfile.Recentfile, opts Options) (quantized int, deduplicated int, err error) {
+	// Read the file
+	if err := rf.Read(); err != nil {
+		return 0, 0, err
+	}
+
+	events := rf.RecentEvents()
+	if len(events) == 0 {
+		return 0, 0, nil
+	}
+
+	// Quantize each epoch to 10µs precision
+	for i := range events {
+		oldEpoch := events[i].Epoch
+		// Quantize to 10-microsecond intervals
+		tenMicroUnits := int64(float64(oldEpoch) * 1e5)
+		newEpoch := recentfile.Epoch(float64(tenMicroUnits) / 1e5)
+
+		if oldEpoch != newEpoch {
+			events[i].Epoch = newEpoch
+			quantized++
+		}
+	}
+
+	// Check for duplicates before deduplication
+	seen := make(map[recentfile.Epoch]bool)
+	dupCount := 0
+	for _, event := range events {
+		if seen[event.Epoch] {
+			dupCount++
+		}
+		seen[event.Epoch] = true
+	}
+
+	// Deduplicate if necessary
+	if dupCount > 0 {
+		events = rf.DeduplicateEpochs(events)
+		deduplicated = dupCount
+	}
+
+	// Only write if we made changes
+	if quantized > 0 || deduplicated > 0 {
+		// Update the recentfile's events
+		rf.SetRecentEvents(events)
+
+		// Write the file back
+		if err := rf.Write(); err != nil {
+			return quantized, deduplicated, fmt.Errorf("write file: %w", err)
+		}
+	}
+
+	return quantized, deduplicated, nil
 }
 
 // repairIndexOrphans adds files on disk but not in index to the principal RECENT file.

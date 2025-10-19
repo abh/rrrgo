@@ -222,7 +222,7 @@ func TestDeduplicateEpochs(t *testing.T) {
 		{Epoch: 99.0, Path: "d", Type: "new"}, // Duplicate epoch
 	}
 
-	result := rf.deduplicateEpochs(events)
+	result := rf.DeduplicateEpochs(events)
 
 	// Check all epochs are unique
 	seen := make(map[Epoch]bool)
