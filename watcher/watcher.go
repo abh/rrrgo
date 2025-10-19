@@ -317,7 +317,9 @@ func (w *Watcher) handleEvents(events []fsnotify.Event) {
 		case event.Op&fsnotify.Create != 0:
 			// If it's a directory, add watch but don't create an entry
 			if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
-				w.watchTree(event.Name)
+				if err := w.watchTree(event.Name); err != nil && w.errorHandler != nil {
+					w.errorHandler(fmt.Errorf("watch tree %s: %w", event.Name, err))
+				}
 				continue
 			}
 			typ = "new"
@@ -389,7 +391,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	case event.Op&fsnotify.Create != 0:
 		// If it's a directory, add watch but don't create an entry
 		if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
-			w.watchTree(event.Name)
+			if err := w.watchTree(event.Name); err != nil && w.errorHandler != nil {
+				w.errorHandler(fmt.Errorf("watch tree %s: %w", event.Name, err))
+			}
 			return
 		}
 		typ = "new"

@@ -351,10 +351,9 @@ type StreamEventCallback func(events []Event) bool
 // It processes events in batches and calls the callback for each batch.
 // batchSize: number of events to accumulate before calling callback (0 = no callback)
 // Returns metadata, total event count, and file size.
-func StreamEvents(path string, batchSize int, callback StreamEventCallback) (*StreamStats, error) {
+func StreamEvents(path string, batchSize int, callback StreamEventCallback) (stats *StreamStats, err error) {
 	filename := filepath.Base(path)
 	var suffix string
-	var err error
 
 	// Check if this is a .recent file
 	if filepath.Ext(filename) == ".recent" {
@@ -376,7 +375,11 @@ func StreamEvents(path string, batchSize int, callback StreamEventCallback) (*St
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close %s: %w", path, closeErr)
+		}
+	}()
 
 	// Get file size
 	fi, err := f.Stat()
@@ -384,7 +387,7 @@ func StreamEvents(path string, batchSize int, callback StreamEventCallback) (*St
 		return nil, fmt.Errorf("stat %s: %w", path, err)
 	}
 
-	stats := &StreamStats{
+	stats = &StreamStats{
 		FileSize: fi.Size(),
 	}
 

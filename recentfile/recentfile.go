@@ -1,6 +1,7 @@
 package recentfile
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -429,7 +430,9 @@ func (rf *Recentfile) BatchUpdate(batch []BatchItem) error {
 	defer rf.Unlock()
 
 	// Read current events (if file exists)
-	_ = rf.Read() // Ignore error if file doesn't exist yet
+	if err := rf.Read(); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read: %w", err)
+	}
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()

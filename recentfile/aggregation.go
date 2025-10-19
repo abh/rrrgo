@@ -1,6 +1,7 @@
 package recentfile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -110,7 +111,9 @@ func (rf *Recentfile) MergeFrom(source *Recentfile) error {
 	defer source.Unlock()
 
 	// Read both files (ignore error if target doesn't exist yet)
-	_ = rf.Read()
+	if err := rf.Read(); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read target: %w", err)
+	}
 
 	if err := source.Read(); err != nil {
 		return fmt.Errorf("read source: %w", err)
