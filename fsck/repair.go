@@ -145,32 +145,16 @@ func repairIndexOrphans(rec *recent.Recent, opts Options) error {
 		opts.Logger.Debug("finding files on disk not in index")
 	}
 
-	// Build set of paths from RECENT files (streaming to avoid OOM)
-	indexPaths := make(map[string]bool)
-	recentfiles := rec.Recentfiles()
+	// Build set of paths that should exist according to index
+	indexPaths, err := buildCurrentIndexState(rec)
+	if err != nil {
+		return fmt.Errorf("build index state: %w", err)
+	}
 
 	// Get ignore pattern for RECENT files
 	meta := rec.PrincipalRecentfile().Meta()
 	filenameRoot := meta.Filenameroot
 	serializerSuffix := meta.SerializerSuffix
-
-	for _, rf := range recentfiles {
-		rfilePath := rf.Rfile()
-		_, err := recentfile.StreamEvents(rfilePath, 10000, func(events []recentfile.Event) bool {
-			for _, event := range events {
-				// Track both new and delete events (delete removes from set)
-				if event.Type == "new" {
-					indexPaths[event.Path] = true
-				} else if event.Type == "delete" {
-					delete(indexPaths, event.Path)
-				}
-			}
-			return true
-		})
-		if err != nil {
-			return fmt.Errorf("read %s: %w", filepath.Base(rfilePath), err)
-		}
-	}
 
 	if opts.Verbose {
 		opts.Logger.Debug("loaded paths from index", "count", len(indexPaths))
@@ -180,7 +164,7 @@ func repairIndexOrphans(rec *recent.Recent, opts Options) error {
 	// Collect files to add
 	var batch []recentfile.BatchItem
 
-	err := filepath.Walk(localRoot, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(localRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // Skip paths we can't access
 		}
@@ -337,28 +321,13 @@ func repairIndexMismatches(rec *recent.Recent, opts Options) error {
 		opts.Logger.Debug("checking index for missing files")
 	}
 
-	// Build set of paths from RECENT files and find missing ones
-	indexPaths := make(map[string]bool)
-	var missingPaths []string
-
-	recentfiles := rec.Recentfiles()
-	for _, rf := range recentfiles {
-		rfilePath := rf.Rfile()
-		_, err := recentfile.StreamEvents(rfilePath, 10000, func(events []recentfile.Event) bool {
-			for _, event := range events {
-				// Track both new and delete events
-				if event.Type == "new" {
-					indexPaths[event.Path] = true
-				} else if event.Type == "delete" {
-					delete(indexPaths, event.Path)
-				}
-			}
-			return true
-		})
-		if err != nil {
-			return fmt.Errorf("read %s: %w", filepath.Base(rfilePath), err)
-		}
+	// Build set of paths that should exist according to index
+	indexPaths, err := buildCurrentIndexState(rec)
+	if err != nil {
+		return fmt.Errorf("build index state: %w", err)
 	}
+
+	var missingPaths []string
 
 	// Find files in index but not on disk
 	for path := range indexPaths {

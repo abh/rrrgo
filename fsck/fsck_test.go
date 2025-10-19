@@ -41,6 +41,61 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
+// TestBuildCurrentIndexState verifies the helper correctly identifies files
+// that should exist based on most recent event type.
+func TestBuildCurrentIndexState(t *testing.T) {
+	rec, rfs := setupTest(t)
+	tmpDir := rec.LocalRoot()
+
+	now := recentfile.EpochNow()
+	oldEpoch := recentfile.EpochFromFloat(float64(now) - 3600) // 1 hour ago
+	newEpoch := now                                            // now
+
+	// Case 1: File with delete as most recent event (should NOT be in index)
+	deletedFile := filepath.Join(tmpDir, "deleted.txt")
+	if err := rfs[1].Update(deletedFile, "new", oldEpoch); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	if err := rfs[0].Update(deletedFile, "delete", newEpoch); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	// Case 2: File with new as most recent event (should BE in index)
+	existingFile := filepath.Join(tmpDir, "existing.txt")
+	if err := rfs[1].Update(existingFile, "delete", oldEpoch); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	if err := rfs[0].Update(existingFile, "new", newEpoch); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	// Case 3: File with only new event (should BE in index)
+	newFile := filepath.Join(tmpDir, "new.txt")
+	if err := rfs[0].Update(newFile, "new", newEpoch); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	indexPaths, err := buildCurrentIndexState(rec)
+	if err != nil {
+		t.Fatalf("buildCurrentIndexState failed: %v", err)
+	}
+
+	// Verify deleted.txt is NOT in index (most recent event is delete)
+	if indexPaths["deleted.txt"] {
+		t.Errorf("deleted.txt should NOT be in index (most recent event is delete)")
+	}
+
+	// Verify existing.txt IS in index (most recent event is new)
+	if !indexPaths["existing.txt"] {
+		t.Errorf("existing.txt should be in index (most recent event is new)")
+	}
+
+	// Verify new.txt IS in index (only event is new)
+	if !indexPaths["new.txt"] {
+		t.Errorf("new.txt should be in index (only event is new)")
+	}
+}
+
 // TestNewerDeleteEvent verifies fsck doesn't report false positive when:
 // - Old file has "new" event (epoch 500)
 // - New file has "delete" event (epoch 1000)
@@ -53,7 +108,7 @@ func TestNewerDeleteEvent(t *testing.T) {
 	// Add events with recent timestamps
 	now := recentfile.EpochNow()
 	oldEpoch := recentfile.EpochFromFloat(float64(now) - 3600) // 1 hour ago
-	newEpoch := now // now
+	newEpoch := now                                            // now
 
 	// Add "new" event to 6h file (older, 1 hour ago)
 	if err := rfs[1].Update(testFile, "new", oldEpoch); err != nil {

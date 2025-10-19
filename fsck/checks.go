@@ -257,42 +257,17 @@ func verifyDiskMatchesIndex(rec *recent.Recent, opts Options) int {
 		opts.Logger.Debug("scanning files on disk")
 	}
 
-	// Build state map of path -> most recent event
-	stateMap := make(map[string]recentfile.Event)
-	recentfiles := rec.Recentfiles()
+	// Build set of paths that should exist according to index
+	indexPaths, err := buildCurrentIndexState(rec)
+	if err != nil {
+		opts.Logger.Warn("cannot build index state", "error", err)
+		return issues
+	}
 
 	// Get ignore pattern for RECENT files
 	meta := rec.PrincipalRecentfile().Meta()
 	filenameRoot := meta.Filenameroot
 	serializerSuffix := meta.SerializerSuffix
-
-	for _, rf := range recentfiles {
-		rfilePath := rf.Rfile()
-		_, err := recentfile.StreamEvents(rfilePath, 10000, func(events []recentfile.Event) bool {
-			for _, event := range events {
-				// Keep the event with the highest epoch for each path
-				if existing, ok := stateMap[event.Path]; ok {
-					if recentfile.EpochGt(event.Epoch, existing.Epoch) {
-						stateMap[event.Path] = event
-					}
-				} else {
-					stateMap[event.Path] = event
-				}
-			}
-			return true
-		})
-		if err != nil {
-			opts.Logger.Warn("cannot read file", "file", filepath.Base(rfilePath), "error", err)
-		}
-	}
-
-	// Build set of paths that should exist (where most recent event is "new")
-	indexPaths := make(map[string]bool)
-	for path, event := range stateMap {
-		if event.Type == "new" {
-			indexPaths[path] = true
-		}
-	}
 
 	if opts.Verbose {
 		opts.Logger.Debug("loaded paths from index", "count", len(indexPaths))
@@ -304,7 +279,7 @@ func verifyDiskMatchesIndex(rec *recent.Recent, opts Options) int {
 	missingInIndex := 0
 	showedMissing := 0
 
-	err := filepath.Walk(localRoot, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(localRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // Skip paths we can't access
 		}
