@@ -287,20 +287,30 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	var typ string
 	switch {
 	case event.Op&fsnotify.Create != 0:
-		typ = "new"
-
-		// If it's a directory, add watch
+		// If it's a directory, add watch but don't create an entry
 		if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
 			w.watchTree(event.Name)
+			return
 		}
+		typ = "new"
 
 	case event.Op&fsnotify.Write != 0:
+		// Skip directory modifications - we don't track those
+		if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
+			return
+		}
 		typ = "new"
 
 	case event.Op&fsnotify.Chmod != 0:
+		// Skip directory permission changes - we don't track those
+		if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
+			return
+		}
 		typ = "new"
 
 	case event.Op&fsnotify.Remove != 0:
+		// For removes, we can't stat since the path is gone
+		// Could be a file or directory - add entry either way
 		typ = "delete"
 
 	case event.Op&fsnotify.Rename != 0:
