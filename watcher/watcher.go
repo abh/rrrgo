@@ -129,7 +129,7 @@ func New(rec *recent.Recent, opts ...Option) (*Watcher, error) {
 		recent:       rec,
 		rootDir:      rec.LocalRoot(),
 		ignoredRx:    ignoredRx,
-		batchChan:    make(chan batchItem, 10000),
+		batchChan:    make(chan batchItem, 100000),
 		batchSize:    1000,
 		batchDelay:   1 * time.Second,
 		ctx:          ctx,
@@ -243,6 +243,8 @@ func (w *Watcher) watchTree(root string) error {
 }
 
 // eventLoop processes fsnotify events.
+// It drains all immediately available events before processing them as a batch,
+// which reduces overhead and matches the Perl implementation's behavior.
 func (w *Watcher) eventLoop() {
 	defer w.wg.Done()
 
@@ -252,7 +254,26 @@ func (w *Watcher) eventLoop() {
 			if !ok {
 				return // Channel closed, watcher stopped
 			}
-			w.handleEvent(event)
+
+			// Drain all immediately available events into a slice
+			events := []fsnotify.Event{event}
+			draining := true
+			for draining && len(events) < 100000 { // Safety limit
+				select {
+				case e, ok := <-w.fsw.Events:
+					if !ok {
+						// Process what we have and exit
+						w.handleEvents(events)
+						return
+					}
+					events = append(events, e)
+				default:
+					draining = false
+				}
+			}
+
+			// Process all drained events together
+			w.handleEvents(events)
 
 		case err, ok := <-w.fsw.Errors:
 			if !ok {
@@ -264,6 +285,85 @@ func (w *Watcher) eventLoop() {
 
 		case <-w.ctx.Done():
 			return
+		}
+	}
+}
+
+// handleEvents processes multiple fsnotify events efficiently.
+// This reduces overhead by processing bursts of events together.
+func (w *Watcher) handleEvents(events []fsnotify.Event) {
+	if len(events) == 0 {
+		return
+	}
+
+	items := make([]batchItem, 0, len(events))
+
+	for _, event := range events {
+		basename := filepath.Base(event.Name)
+
+		// Filter 1: Skip temporary files
+		if recentfile.ShouldIgnoreFile(basename) {
+			continue
+		}
+
+		// Filter 2: Ignore RECENT files
+		if w.ignoredRx.MatchString(basename) {
+			continue
+		}
+
+		// Determine event type
+		var typ string
+		switch {
+		case event.Op&fsnotify.Create != 0:
+			// If it's a directory, add watch but don't create an entry
+			if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
+				w.watchTree(event.Name)
+				continue
+			}
+			typ = "new"
+
+		case event.Op&fsnotify.Write != 0:
+			// Skip directory modifications - we don't track those
+			if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
+				continue
+			}
+			typ = "new"
+
+		case event.Op&fsnotify.Chmod != 0:
+			// Skip directory permission changes - we don't track those
+			if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
+				continue
+			}
+			typ = "new"
+
+		case event.Op&fsnotify.Remove != 0:
+			// For removes, we can't stat since the path is gone
+			// Could be a file or directory - add entry either way
+			typ = "delete"
+
+		case event.Op&fsnotify.Rename != 0:
+			typ = "delete" // Source of rename
+
+		default:
+			continue // Ignore unknown events
+		}
+
+		if w.verbose {
+			fmt.Printf("Event: %s %s\n", typ, event.Name)
+		}
+
+		items = append(items, batchItem{path: event.Name, typ: typ})
+	}
+
+	// Send all items to batch channel
+	for _, item := range items {
+		select {
+		case w.batchChan <- item:
+		default:
+			// Channel full, drop event
+			if w.errorHandler != nil {
+				w.errorHandler(fmt.Errorf("batch channel full, dropping event: %s", item.path))
+			}
 		}
 	}
 }
