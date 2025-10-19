@@ -215,12 +215,22 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 	w, err := watcher.New(rec,
 		watcher.WithBatchSize(cli.BatchSize),
 		watcher.WithBatchDelay(cli.BatchDelay),
+		watcher.WithAggregateInterval(cli.AggregateInterval),
 		watcher.WithVerbose(cli.Verbose),
 		watcher.WithErrorHandler(func(err error) {
 			log.Error("watcher error", "error", err)
 		}),
 		watcher.WithEventCallback(func(eventType string, count int) {
 			eventsProcessed.WithLabelValues(eventType).Add(float64(count))
+		}),
+		watcher.WithAggregationCallback(func(duration time.Duration) {
+			aggregationRuns.Inc()
+			aggregationDuration.Observe(duration.Seconds())
+			stats := rec.Stats()
+			log.Info("aggregation complete",
+				"duration", duration,
+				"total_events", stats.TotalEvents,
+			)
 		}),
 	)
 	if err != nil {
@@ -247,13 +257,6 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 		log: log,
 	}
 
-	// Start periodic aggregation
-	stopAgg := make(chan struct{})
-	aggDone := make(chan struct{})
-	go srv.periodicAggregation(cli.AggregateInterval, stopAgg, aggDone)
-
-	log.Info("periodic aggregation started", "interval", cli.AggregateInterval)
-
 	// Start metrics reporter
 	stopMetrics := make(chan struct{})
 	metricsDone := make(chan struct{})
@@ -269,10 +272,6 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 	// Stop metrics reporter
 	close(stopMetrics)
 	<-metricsDone
-
-	// Stop periodic aggregation
-	close(stopAgg)
-	<-aggDone
 
 	// Stop watcher
 	if err := w.Stop(); err != nil {
@@ -347,40 +346,6 @@ func createOrLoadRecent(localRoot, interval, format string, aggregator []string,
 	return rec, nil
 }
 
-// periodicAggregation runs aggregation at regular intervals.
-func (s *server) periodicAggregation(interval time.Duration, stop chan struct{}, done chan struct{}) {
-	defer close(done)
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			s.log.Debug("running periodic aggregation")
-
-			start := time.Now()
-			if err := s.rec.Aggregate(false); err != nil {
-				s.log.Error("aggregation error", "error", err)
-			} else {
-				duration := time.Since(start)
-				stats := s.rec.Stats()
-
-				// Update Prometheus metrics
-				s.metrics.aggregationRuns.Inc()
-				s.metrics.aggregationDuration.Observe(duration.Seconds())
-
-				s.log.Info("aggregation complete",
-					"duration", duration,
-					"total_events", stats.TotalEvents,
-				)
-			}
-
-		case <-stop:
-			return
-		}
-	}
-}
 
 // metricsReporter periodically reports watcher stats to Prometheus.
 func (s *server) metricsReporter(stop chan struct{}, done chan struct{}) {

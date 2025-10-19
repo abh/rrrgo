@@ -39,6 +39,9 @@ type Watcher struct {
 	lastFlush   time.Time
 	lastFlushMu sync.Mutex
 
+	// Aggregation
+	aggregateInterval time.Duration // How often to run aggregation (0 = disabled)
+
 	// Context for shutdown
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -55,6 +58,10 @@ type Watcher struct {
 	// Event callback - called after successful batch processing
 	// Arguments: eventType ("new" or "delete"), count
 	eventCallback func(eventType string, count int)
+
+	// Aggregation callback - called after successful aggregation
+	// Argument: duration of aggregation
+	aggregationCallback func(duration time.Duration)
 }
 
 // batchItem is an internal item in the batch channel.
@@ -99,6 +106,22 @@ func WithErrorHandler(handler func(error)) Option {
 func WithEventCallback(callback func(eventType string, count int)) Option {
 	return func(w *Watcher) {
 		w.eventCallback = callback
+	}
+}
+
+// WithAggregateInterval sets the interval for periodic aggregation.
+// If set to 0, aggregation is disabled.
+func WithAggregateInterval(interval time.Duration) Option {
+	return func(w *Watcher) {
+		w.aggregateInterval = interval
+	}
+}
+
+// WithAggregationCallback sets a callback for tracking aggregation runs.
+// The callback is called after each successful aggregation with the duration.
+func WithAggregationCallback(callback func(duration time.Duration)) Option {
+	return func(w *Watcher) {
+		w.aggregationCallback = callback
 	}
 }
 
@@ -443,8 +466,18 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 func (w *Watcher) batchProcessor() {
 	defer w.wg.Done()
 
-	ticker := time.NewTicker(100 * time.Millisecond) // Check every 100ms
-	defer ticker.Stop()
+	// Create timer for batch flushing
+	flushTimer := time.NewTimer(w.batchDelay)
+	defer flushTimer.Stop()
+
+	// Create timer for aggregation (if enabled)
+	var aggregateTimer *time.Timer
+	var aggregateChan <-chan time.Time
+	if w.aggregateInterval > 0 {
+		aggregateTimer = time.NewTimer(w.aggregateInterval)
+		aggregateChan = aggregateTimer.C
+		defer aggregateTimer.Stop()
+	}
 
 	for {
 		select {
@@ -465,17 +498,36 @@ func (w *Watcher) batchProcessor() {
 
 			if needFlush {
 				w.flushBatch()
+				// Reset flush timer after flushing
+				if !flushTimer.Stop() {
+					select {
+					case <-flushTimer.C:
+					default:
+					}
+				}
+				flushTimer.Reset(w.batchDelay)
 			}
 
-		case <-ticker.C:
-			// Check if it's time to flush based on delay
-			w.lastFlushMu.Lock()
-			timeSinceFlush := time.Since(w.lastFlush)
-			w.lastFlushMu.Unlock()
+		case <-flushTimer.C:
+			w.flushBatch()
+			flushTimer.Reset(w.batchDelay)
 
-			if timeSinceFlush >= w.batchDelay {
-				w.flushBatch()
+		case <-aggregateChan:
+			if w.verbose {
+				fmt.Println("Running periodic aggregation")
 			}
+			start := time.Now()
+			if err := w.recent.Aggregate(false); err != nil {
+				if w.errorHandler != nil {
+					w.errorHandler(fmt.Errorf("aggregation error: %w", err))
+				}
+			} else {
+				duration := time.Since(start)
+				if w.aggregationCallback != nil {
+					w.aggregationCallback(duration)
+				}
+			}
+			aggregateTimer.Reset(w.aggregateInterval)
 
 		case <-w.ctx.Done():
 			w.flushBatch()
