@@ -519,3 +519,76 @@ func TestAggregateSkipsWhenNotNeeded(t *testing.T) {
 		t.Log("1d file was created (timing dependent)")
 	}
 }
+
+func TestMergeFromWithMergedEpochMinLogic(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	now := EpochNow()
+	nowFloat := EpochToFloat(now)
+
+	// Create target (6h) with a merged epoch from past
+	// merged.epoch represents when it was last merged into the 1d file
+	mergedEpoch := EpochFromFloat(nowFloat - 7200) // 2 hours ago
+
+	target := New(
+		WithLocalRoot(tmpDir),
+		WithInterval("6h"),
+	)
+	target.mu.Lock()
+	target.meta.Merged = &MergedInfo{
+		Epoch:        mergedEpoch,
+		IntoInterval: "1d",
+	}
+	target.mu.Unlock()
+
+	// Add an old event to target (from before merge)
+	oldEpoch := EpochFromFloat(nowFloat - 5400) // 1.5 hours ago (between merged and interval cutoff)
+	target.BatchUpdate([]BatchItem{
+		{Path: "old_file.txt", Type: "new", Epoch: oldEpoch},
+	})
+
+	// Verify target has the event
+	targetBefore, _ := NewFromFile(target.Rfile())
+	if len(targetBefore.recent) != 1 {
+		t.Fatalf("target should have 1 event before merge, got %d", len(targetBefore.recent))
+	}
+
+	// Create source (1h) with events
+	// This source represents a newer 1h interval
+	source := New(
+		WithLocalRoot(tmpDir),
+		WithInterval("1h"),
+	)
+	source.BatchUpdate([]BatchItem{
+		{Path: "new_file.txt", Type: "new"},
+	})
+
+	// Merge source into target
+	if err := target.MergeFrom(source); err != nil {
+		t.Fatalf("MergeFrom failed: %v", err)
+	}
+
+	// Verify both events are kept:
+	// 1. The old event should be kept because it's within the 6h interval window
+	//    (even though it's older than merged.epoch)
+	// 2. The new event should be kept
+	targetAfter, _ := NewFromFile(target.Rfile())
+	if len(targetAfter.recent) != 2 {
+		t.Errorf("target should have 2 events after merge (old within interval + new), got %d", len(targetAfter.recent))
+		for i, e := range targetAfter.recent {
+			t.Logf("  event %d: path=%s epoch=%v", i, e.Path, e.Epoch)
+		}
+	}
+
+	// Verify the old event is still there
+	foundOld := false
+	for _, e := range targetAfter.recent {
+		if e.Path == "old_file.txt" {
+			foundOld = true
+			break
+		}
+	}
+	if !foundOld {
+		t.Error("old_file.txt should be kept because it's within the 6h interval")
+	}
+}

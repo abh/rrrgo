@@ -128,18 +128,28 @@ func (rf *Recentfile) MergeFrom(source *Recentfile) error {
 		// Dirtymarks differ, keep everything
 		oldestAllowed = 0
 	} else {
-		// Calculate cutoff based on interval and merged info
+		// Calculate cutoff based on interval duration
+		now := EpochNow()
+		nowFloat := EpochToFloat(now)
+		intervalSecs := rf.IntervalSecs()
+		var intervalCutoff Epoch
+		if intervalSecs != ZSeconds {
+			cutoffFloat := nowFloat - float64(intervalSecs)
+			intervalCutoff = EpochFromFloat(cutoffFloat)
+		}
+
+		// Use minimum of interval cutoff and merged epoch (if available)
+		// This matches Perl: min($epoch - $secs, $merged->{epoch}||0)
 		if rf.meta.Merged != nil && !rf.meta.Merged.Epoch.IsZero() {
-			oldestAllowed = rf.meta.Merged.Epoch
-		} else {
-			// Use interval-based cutoff
-			now := EpochNow()
-			nowFloat := EpochToFloat(now)
-			intervalSecs := rf.IntervalSecs()
-			if intervalSecs != ZSeconds {
-				cutoffFloat := nowFloat - float64(intervalSecs)
-				oldestAllowed = EpochFromFloat(cutoffFloat)
+			mergedEpoch := rf.meta.Merged.Epoch
+			// Use the smaller (earlier) epoch to be more permissive
+			if !intervalCutoff.IsZero() && EpochLt(intervalCutoff, mergedEpoch) {
+				oldestAllowed = intervalCutoff
+			} else {
+				oldestAllowed = mergedEpoch
 			}
+		} else {
+			oldestAllowed = intervalCutoff
 		}
 	}
 
