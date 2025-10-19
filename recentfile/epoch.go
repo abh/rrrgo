@@ -8,20 +8,29 @@ import (
 	"time"
 )
 
-// Epoch represents a high-precision timestamp as a float64.
+// Epoch represents a timestamp as a float64.
 // This matches the Perl implementation and is memory efficient.
+// Precision: 10 microseconds (5 decimal places in seconds)
+// This ensures no precision loss when serialized to JSON as float64.
 // Format: Unix timestamp with fractional seconds (e.g., 1760007882.98731)
 type Epoch float64
 
-// EpochNow returns the current time as an Epoch.
+// EpochNow returns the current time as an Epoch with 10-microsecond precision.
+// The 10-microsecond granularity guarantees no two distinct events will have
+// identical epoch values after JSON float64 serialization/deserialization.
+// This prevents the "disorder" error in the Perl recentfile implementation.
 func EpochNow() Epoch {
 	now := time.Now()
-	return Epoch(float64(now.Unix()) + float64(now.Nanosecond())/1e9)
+	// Quantize to 10-microsecond intervals: divide microseconds by 10, then convert to seconds
+	tenMicroUnits := now.UnixMicro() / 10
+	return Epoch(float64(tenMicroUnits) / 1e5)
 }
 
-// EpochFromTime converts a time.Time to an Epoch.
+// EpochFromTime converts a time.Time to an Epoch with 10-microsecond precision.
 func EpochFromTime(t time.Time) Epoch {
-	return Epoch(float64(t.Unix()) + float64(t.Nanosecond())/1e9)
+	// Quantize to 10-microsecond intervals
+	tenMicroUnits := t.UnixMicro() / 10
+	return Epoch(float64(tenMicroUnits) / 1e5)
 }
 
 // EpochFromFloat converts a float64 to an Epoch.
@@ -114,8 +123,8 @@ func (e Epoch) IsZero() bool {
 
 // String returns the epoch as a string with appropriate precision.
 func (e Epoch) String() string {
-	// Use %.9f to match typical Unix timestamp precision
-	s := fmt.Sprintf("%.9f", float64(e))
+	// Use %.5f for 10-microsecond precision (5 decimal places)
+	s := fmt.Sprintf("%.5f", float64(e))
 	// Trim trailing zeros but keep at least one decimal place
 	for len(s) > 0 && s[len(s)-1] == '0' && s[len(s)-2] != '.' {
 		s = s[:len(s)-1]

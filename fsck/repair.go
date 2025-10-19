@@ -133,7 +133,7 @@ func repairIndexOrphans(rec *recent.Recent, opts Options) error {
 			batch = append(batch, recentfile.BatchItem{
 				Path:  relPath,
 				Type:  "new",
-				Epoch: recentfile.Epoch(info.ModTime().Unix()),
+				Epoch: recentfile.EpochFromTime(info.ModTime()),
 			})
 		}
 
