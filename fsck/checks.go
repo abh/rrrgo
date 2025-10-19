@@ -146,116 +146,96 @@ func checkOrphanedFiles(rec *recent.Recent, opts Options) int {
 }
 
 // verifyEventsMatchFilesystem checks that files mentioned in RECENT events exist on disk.
+// It builds a complete state map first, keeping only the most recent event for each path,
+// then verifies only files where the most recent event is "new" (not "delete").
 func verifyEventsMatchFilesystem(rec *recent.Recent, opts Options) int {
 	issues := 0
 	localRoot := rec.LocalRoot()
 
 	if opts.Verbose {
-		opts.Logger.Debug("streaming through events from all RECENT files")
+		opts.Logger.Debug("building current expected state from all RECENT files")
 	}
 
-	// Track statistics across all files
+	// Build map of path -> most recent event
+	stateMap := make(map[string]recentfile.Event)
 	totalEvents := 0
-	checked := 0
-	missing := 0
-	showedMissing := 0
-	maxSample := 1000 // For non-verbose mode, check at most this many
 
-	// Stream through events in batches
-	batchSize := 10000
-	lastReportedEvents := 0
-
-	// Get all recentfiles
 	recentfiles := rec.Recentfiles()
 
-	// Check events from all recentfiles
-	for i, rf := range recentfiles {
+	for _, rf := range recentfiles {
 		rfilePath := rf.Rfile()
 
-		if opts.Verbose {
-			opts.Logger.Debug("checking events from file", "file", filepath.Base(rfilePath))
-		}
-
-		_, err := recentfile.StreamEvents(rfilePath, batchSize, func(events []recentfile.Event) bool {
+		_, err := recentfile.StreamEvents(rfilePath, 10000, func(events []recentfile.Event) bool {
 			for _, event := range events {
 				totalEvents++
 
-				// In non-verbose mode, only check a sample
-				if !opts.Verbose && checked >= maxSample {
-					continue
-				}
-
-				// Skip delete events - those files shouldn't exist
-				if event.Type == "delete" {
-					continue
-				}
-
-				checked++
-				fullPath := filepath.Join(localRoot, event.Path)
-
-				// Check if file/symlink exists (Lstat doesn't follow symlinks)
-				_, lstErr := os.Lstat(fullPath)
-				if lstErr != nil {
-					if os.IsNotExist(lstErr) {
-						// File truly doesn't exist
-						if opts.Verbose || showedMissing < 10 { // Only show first 10 missing files unless verbose
-							opts.Logger.Warn("file in RECENT but not on disk", "path", event.Path)
-							showedMissing++
-						}
-						missing++
-						issues++
+				// Keep the event with the highest epoch for each path
+				if existing, ok := stateMap[event.Path]; ok {
+					if recentfile.EpochGt(event.Epoch, existing.Epoch) {
+						stateMap[event.Path] = event
 					}
-					continue
-				}
-
-				// File/symlink exists, check if it's a broken symlink
-				_, statErr := os.Stat(fullPath)
-				if statErr != nil && os.IsNotExist(statErr) {
-					// Broken symlink (symlink exists but target doesn't)
-					if opts.Verbose || showedMissing < 10 {
-						opts.Logger.Warn("broken symlink in RECENT", "path", event.Path)
-						showedMissing++
-					}
-					// Don't increment issues - broken symlinks are informational only
+				} else {
+					stateMap[event.Path] = event
 				}
 			}
-
-			// Show progress in verbose mode after each batch
-			if opts.Verbose && totalEvents-lastReportedEvents >= 10000 {
-				opts.Logger.Debug("progress", "events", totalEvents, "checked", checked, "missing", missing)
-				lastReportedEvents = totalEvents
-			}
-
-			// Continue streaming
 			return true
 		})
 		if err != nil {
 			opts.Logger.Warn("cannot stream file", "file", filepath.Base(rfilePath), "error", err)
 			issues++
+		}
+	}
+
+	if opts.Verbose {
+		opts.Logger.Debug("built state map", "total_events", totalEvents, "unique_paths", len(stateMap))
+	}
+
+	// Now check only files where the most recent event is "new"
+	checked := 0
+	missing := 0
+	showedMissing := 0
+	maxSample := 1000
+
+	for path, event := range stateMap {
+		// Skip files where most recent event is "delete"
+		if event.Type == "delete" {
 			continue
 		}
 
-		// Show progress after each file in verbose mode
-		if opts.Verbose {
-			opts.Logger.Debug("finished checking file", "file", filepath.Base(rfilePath))
-		}
-
-		// In non-verbose mode, stop after checking maxSample files
+		// In non-verbose mode, only check a sample
 		if !opts.Verbose && checked >= maxSample {
-			if opts.Verbose {
-				opts.Logger.Debug("stopping early", "checked", checked, "files_checked", i+1, "total_files", len(recentfiles))
+			continue
+		}
+
+		checked++
+		fullPath := filepath.Join(localRoot, path)
+
+		// Check if file/symlink exists (Lstat doesn't follow symlinks)
+		_, lstErr := os.Lstat(fullPath)
+		if lstErr != nil {
+			if os.IsNotExist(lstErr) {
+				if opts.Verbose || showedMissing < 10 {
+					opts.Logger.Warn("file in RECENT but not on disk", "path", path)
+					showedMissing++
+				}
+				missing++
+				issues++
 			}
-			break
+			continue
+		}
+
+		// File/symlink exists, check if it's a broken symlink
+		_, statErr := os.Stat(fullPath)
+		if statErr != nil && os.IsNotExist(statErr) {
+			if opts.Verbose || showedMissing < 10 {
+				opts.Logger.Warn("broken symlink in RECENT", "path", path)
+				showedMissing++
+			}
 		}
 	}
 
-	// Show final progress if we haven't reported recently
-	if opts.Verbose && totalEvents > lastReportedEvents {
-		opts.Logger.Debug("final progress", "events", totalEvents, "checked", checked, "missing", missing)
-	}
-
-	if !opts.Verbose && totalEvents > maxSample {
-		opts.Logger.Info("checked sample", "checked", checked, "total_events", totalEvents)
+	if !opts.Verbose && len(stateMap) > maxSample {
+		opts.Logger.Info("checked sample", "checked", checked, "total_paths", len(stateMap))
 	}
 
 	if missing > 0 {
@@ -277,8 +257,8 @@ func verifyDiskMatchesIndex(rec *recent.Recent, opts Options) int {
 		opts.Logger.Debug("scanning files on disk")
 	}
 
-	// Build set of paths from RECENT files (streaming to avoid OOM)
-	indexPaths := make(map[string]bool)
+	// Build state map of path -> most recent event
+	stateMap := make(map[string]recentfile.Event)
 	recentfiles := rec.Recentfiles()
 
 	// Get ignore pattern for RECENT files
@@ -290,15 +270,27 @@ func verifyDiskMatchesIndex(rec *recent.Recent, opts Options) int {
 		rfilePath := rf.Rfile()
 		_, err := recentfile.StreamEvents(rfilePath, 10000, func(events []recentfile.Event) bool {
 			for _, event := range events {
-				// Only track "new" events (skip deletes)
-				if event.Type == "new" {
-					indexPaths[event.Path] = true
+				// Keep the event with the highest epoch for each path
+				if existing, ok := stateMap[event.Path]; ok {
+					if recentfile.EpochGt(event.Epoch, existing.Epoch) {
+						stateMap[event.Path] = event
+					}
+				} else {
+					stateMap[event.Path] = event
 				}
 			}
 			return true
 		})
 		if err != nil {
 			opts.Logger.Warn("cannot read file", "file", filepath.Base(rfilePath), "error", err)
+		}
+	}
+
+	// Build set of paths that should exist (where most recent event is "new")
+	indexPaths := make(map[string]bool)
+	for path, event := range stateMap {
+		if event.Type == "new" {
+			indexPaths[path] = true
 		}
 	}
 
