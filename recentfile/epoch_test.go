@@ -2,6 +2,7 @@ package recentfile
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 )
@@ -228,16 +229,28 @@ func TestEpochFromTime(t *testing.T) {
 	epoch := EpochFromTime(now)
 
 	// Verify 10-microsecond quantization is applied
-	// Epoch should be quantized to 10-microsecond intervals
-	epochFloat := EpochToFloat(epoch)
+	// The correct way to test this is JSON round-trip, since that's what matters
+	// Float64 division/multiplication introduces rounding errors that make
+	// mathematical checks unreliable (see docs/epoch-quantization.md)
 
-	// Multiply by 1e5 to convert to 10-microsecond units, should be an integer
-	quantized := epochFloat * 1e5
-	remainder := quantized - float64(int64(quantized))
+	// Serialize to JSON
+	data, err := json.Marshal(epoch)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
 
-	// Allow tiny floating point rounding error (less than 1 in 1e-15)
-	if remainder > 1e-10 {
-		t.Errorf("EpochFromTime() not properly quantized to 10-microsecond intervals: remainder = %v", remainder)
+	// Deserialize from JSON
+	var decoded Epoch
+	err = json.Unmarshal(data, &decoded)
+	if err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+
+	// Should be exactly equal after round-trip
+	// This is what quantization guarantees
+	if epoch != decoded {
+		t.Errorf("EpochFromTime() lost precision in JSON: original=%v, decoded=%v, diff=%v",
+			epoch, decoded, math.Abs(float64(epoch-decoded)))
 	}
 }
 

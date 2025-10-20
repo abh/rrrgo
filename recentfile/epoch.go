@@ -3,7 +3,6 @@ package recentfile
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"strconv"
 	"time"
 )
@@ -94,9 +93,12 @@ func EpochMin(l, r Epoch) Epoch {
 // EpochIncreaseABit returns an epoch slightly larger than e.
 // This is used to ensure monotonically increasing epochs when
 // timestamps collide.
+// Increments by 10 microseconds to maintain quantization (5 decimal places).
 func EpochIncreaseABit(e Epoch) Epoch {
-	// Use math.Nextafter to get the next representable float64 value
-	return Epoch(math.Nextafter(float64(e), math.Inf(1)))
+	// Increment by 10 microseconds (0.00001 seconds)
+	// This maintains the 10µs quantization scheme and prevents
+	// excessive precision that would violate JSON float64 round-trip safety
+	return e + 0.00001
 }
 
 // EpochBetween returns an epoch between l and r (closer to l).
