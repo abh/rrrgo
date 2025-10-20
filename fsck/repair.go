@@ -216,6 +216,7 @@ func repairIndexOrphans(rec *recent.Recent, opts Options) error {
 		// Check if in index
 		if !indexPaths[relPath] {
 			// File not in index - add to batch
+			// Use current time (zero epoch) so old files don't get immediately truncated
 			if opts.Verbose {
 				opts.Logger.Debug("adding file to index", "path", relPath, "mtime", info.ModTime().Unix())
 			}
@@ -223,7 +224,7 @@ func repairIndexOrphans(rec *recent.Recent, opts Options) error {
 			batch = append(batch, recentfile.BatchItem{
 				Path:  relPath,
 				Type:  "new",
-				Epoch: recentfile.EpochFromTime(info.ModTime()),
+				Epoch: recentfile.Epoch(0), // Use current time, not file mtime
 			})
 		}
 
