@@ -41,10 +41,14 @@ func (rf *Recentfile) Aggregate(force bool) error {
 	// Track previous interval for age checking
 	prevInterval := rf.interval
 
+	// Create aggregation chain (Bug #3 fix)
+	// Each level merges from the previous level, not all from principal
+	source := rf
+
 	// Aggregate into each target interval
 	for _, targetInterval := range targetIntervals {
-		// Create sparse clone for target interval
-		target := rf.SparseClone()
+		// Create sparse clone for target interval from PREVIOUS level
+		target := source.SparseClone()
 		target.SetInterval(targetInterval)
 
 		// Decide if we should merge
@@ -59,32 +63,34 @@ func (rf *Recentfile) Aggregate(force bool) error {
 			break
 		}
 
-		// Perform the merge
-		if err := target.MergeFrom(rf); err != nil {
+		// Perform the merge from previous level (not always from principal)
+		if err := target.MergeFrom(source); err != nil {
 			return fmt.Errorf("merge into %s: %w", targetInterval, err)
 		}
 
-		// Update our merged metadata
-		rf.mu.Lock()
+		// Update source's merged metadata
+		source.mu.Lock()
 		if len(target.recent) > 0 {
-			rf.meta.Merged = &MergedInfo{
+			source.meta.Merged = &MergedInfo{
 				Epoch:        target.recent[0].Epoch,
 				IntoInterval: targetInterval,
 			}
 		}
-		rf.mu.Unlock()
+		source.mu.Unlock()
+
+		// Write source file to persist merged metadata (needed for next aggregation cycle)
+		if err := source.Lock(); err != nil {
+			return fmt.Errorf("lock source %s: %w", source.interval, err)
+		}
+		if err := source.Write(); err != nil {
+			source.Unlock()
+			return fmt.Errorf("write source %s: %w", source.interval, err)
+		}
+		source.Unlock()
 
 		prevInterval = targetInterval
-	}
-
-	// Write our updated metadata (merged info)
-	if err := rf.Lock(); err != nil {
-		return fmt.Errorf("lock for metadata update: %w", err)
-	}
-	defer rf.Unlock()
-
-	if err := rf.Write(); err != nil {
-		return fmt.Errorf("write metadata: %w", err)
+		// Use target as source for next iteration (creates the chain)
+		source = target
 	}
 
 	return nil
@@ -159,8 +165,12 @@ func (rf *Recentfile) MergeFrom(source *Recentfile) error {
 	// Merge events from both
 	mergedEvents := make(map[string]Event) // path -> event
 
-	// Add events from target (rf)
+	// Add events from target (rf) - filter old events like Perl does
 	for _, event := range rf.recent {
+		// Skip old events from target (Bug #2 fix)
+		if !oldestAllowed.IsZero() && EpochLt(event.Epoch, oldestAllowed) {
+			continue
+		}
 		mergedEvents[event.Path] = event
 	}
 
