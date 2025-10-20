@@ -592,3 +592,169 @@ func TestMergeFromWithMergedEpochMinLogic(t *testing.T) {
 		t.Error("old_file.txt should be kept because it's within the 6h interval")
 	}
 }
+
+// TestAggregateChainProgressionWithCorrectInterval tests Bug #5 fix:
+// Aggregation should check target age against PREVIOUS source interval,
+// not current source interval. This ensures chain progresses correctly.
+func TestAggregateChainProgressionWithCorrectInterval(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create principal with multi-level aggregation
+	principal := New(
+		WithLocalRoot(tmpDir),
+		WithInterval("1h"),
+		WithAggregator([]string{"6h", "1d", "1W"}),
+	)
+
+	// Add some events
+	principal.BatchUpdate([]BatchItem{
+		{Path: "file1.txt", Type: "new"},
+		{Path: "file2.txt", Type: "new"},
+	})
+
+	// Run aggregation with force to populate all levels
+	if err := principal.Aggregate(true); err != nil {
+		t.Fatalf("Initial aggregate failed: %v", err)
+	}
+
+	// Sleep to ensure file mtime will change on next write
+	time.Sleep(10 * time.Millisecond)
+
+	// Simulate realistic file ages for chain progression:
+	// - 6h file: 2 hours old (fresh, will trigger 6h→1d merge)
+	// - 1d file: 8 hours old (will trigger 1d→1W merge)
+	// - 1W file: 8 hours old (older than 6h but younger than 1d)
+	//
+	// With correct logic: 1W older than 6h (21,600s) → merge happens
+	// With bug: 1W younger than 1d (86,400s) → merge blocked
+	now := time.Now()
+	rf6h := filepath.Join(tmpDir, "RECENT-6h.yaml")
+	rf1d := filepath.Join(tmpDir, "RECENT-1d.yaml")
+	rf1W := filepath.Join(tmpDir, "RECENT-1W.yaml")
+
+	// Set realistic mtimes
+	if err := os.Chtimes(rf6h, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatalf("Failed to set 6h mtime: %v", err)
+	}
+	if err := os.Chtimes(rf1d, now.Add(-8*time.Hour), now.Add(-8*time.Hour)); err != nil {
+		t.Fatalf("Failed to set 1d mtime: %v", err)
+	}
+	initial1WMtime := now.Add(-8 * time.Hour)
+	if err := os.Chtimes(rf1W, initial1WMtime, initial1WMtime); err != nil {
+		t.Fatalf("Failed to set 1W mtime: %v", err)
+	}
+
+	// Add a new event to trigger aggregation
+	principal.BatchUpdate([]BatchItem{
+		{Path: "file3.txt", Type: "new"},
+	})
+
+	// Run aggregation without force
+	// With Bug #5 fix: Should merge because 1W is older than 6h interval
+	// Without fix: Would skip because 1W is younger than 1d interval
+	if err := principal.Aggregate(false); err != nil {
+		t.Fatalf("Aggregate failed: %v", err)
+	}
+
+	// Verify 1W file was updated
+	stat1WAfter, err := os.Stat(rf1W)
+	if err != nil {
+		t.Fatalf("1W file should still exist: %v", err)
+	}
+
+	if !stat1WAfter.ModTime().After(initial1WMtime) {
+		t.Errorf("1W file should have been updated (mtime should change)")
+		t.Errorf("  Initial mtime: %v", initial1WMtime)
+		t.Errorf("  After mtime:   %v", stat1WAfter.ModTime())
+		t.Error("This indicates Bug #5 is not fixed: chain checks wrong interval")
+	}
+
+	// Verify 1W file has the new event
+	rf1WObj, err := NewFromFile(rf1W)
+	if err != nil {
+		t.Fatalf("Failed to read 1W file: %v", err)
+	}
+
+	found := false
+	for _, e := range rf1WObj.recent {
+		if e.Path == "file3.txt" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("1W file should contain file3.txt after chain progression")
+	}
+}
+
+// TestMergeFromFirstMergePreservesAllEvents tests Bug #6 fix:
+// First merge (no merged metadata) should preserve all events,
+// not truncate based on interval.
+func TestMergeFromFirstMergePreservesAllEvents(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	now := EpochNow()
+	nowFloat := EpochToFloat(now)
+
+	// Create source (1h) with old events (from 10 days ago)
+	source := New(
+		WithLocalRoot(tmpDir),
+		WithInterval("1h"),
+	)
+
+	oldEpoch := EpochFromFloat(nowFloat - 10*86400) // 10 days ago
+
+	// Manually create events (BatchUpdate would truncate old events)
+	source.mu.Lock()
+	source.recent = []Event{
+		{Path: "new_file.txt", Type: "new", Epoch: now},      // Current time (most recent)
+		{Path: "old_file.txt", Type: "new", Epoch: oldEpoch}, // 10 days ago
+	}
+	source.meta.Dirtymark = now // Set dirtymark
+	source.mu.Unlock()
+
+	// Write the source file
+	if err := source.Write(); err != nil {
+		t.Fatalf("Failed to write source: %v", err)
+	}
+
+	// Create target (1W) with NO merged metadata (first merge)
+	target := New(
+		WithLocalRoot(tmpDir),
+		WithInterval("1W"),
+	)
+	// Don't set merged metadata - this is a first-time merge
+
+	// Merge source into target
+	if err := target.MergeFrom(source); err != nil {
+		t.Fatalf("MergeFrom failed: %v", err)
+	}
+
+	// Read target after merge
+	targetAfter, err := NewFromFile(target.Rfile())
+	if err != nil {
+		t.Fatalf("Failed to read target: %v", err)
+	}
+
+	// With Bug #6 fix: Both events should be preserved (oldestAllowed = 0)
+	// Without fix: old_file.txt would be truncated (oldestAllowed = now - 1W)
+	if len(targetAfter.recent) != 2 {
+		t.Errorf("First merge should preserve all events, got %d want 2", len(targetAfter.recent))
+		for i, e := range targetAfter.recent {
+			t.Logf("  event %d: path=%s epoch=%v", i, e.Path, e.Epoch)
+		}
+	}
+
+	// Verify old event is preserved
+	foundOld := false
+	for _, e := range targetAfter.recent {
+		if e.Path == "old_file.txt" {
+			foundOld = true
+			break
+		}
+	}
+	if !foundOld {
+		t.Error("First merge should preserve old events (Bug #6 fix)")
+		t.Error("old_file.txt from 10 days ago should be kept when no merged metadata exists")
+	}
+}

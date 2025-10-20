@@ -38,8 +38,9 @@ func (rf *Recentfile) Aggregate(force bool) error {
 		return nil // No larger intervals to aggregate into
 	}
 
-	// Track previous interval for age checking
-	prevInterval := rf.interval
+	// Track interval of the level BEFORE current source (for age checking)
+	// Perl: uses $aggs[$i-1]{object} to check against previous level's interval
+	prevSourceInterval := rf.interval
 
 	// Create aggregation chain (Bug #3 fix)
 	// Each level merges from the previous level, not all from principal
@@ -52,10 +53,13 @@ func (rf *Recentfile) Aggregate(force bool) error {
 		target.SetInterval(targetInterval)
 
 		// Decide if we should merge
-		shouldMerge := force || prevInterval == rf.interval
+		// First iteration (source is principal): always merge
+		// Later iterations: check if target file is old enough
+		shouldMerge := force || source.interval == rf.interval
 		if !shouldMerge {
-			// Check target file age vs previous interval duration
-			shouldMerge = shouldMergeByAge(target, prevInterval)
+			// Check target file age vs PREVIOUS source's interval duration
+			// Perl: $next_age > $prev->interval_secs (prev = level before current source)
+			shouldMerge = shouldMergeByAge(target, prevSourceInterval)
 		}
 
 		if !shouldMerge {
@@ -88,7 +92,8 @@ func (rf *Recentfile) Aggregate(force bool) error {
 		}
 		source.Unlock()
 
-		prevInterval = targetInterval
+		// Save current source's interval before moving to next level
+		prevSourceInterval = source.interval
 		// Use target as source for next iteration (creates the chain)
 		source = target
 	}
@@ -128,16 +133,15 @@ func (rf *Recentfile) MergeFrom(source *Recentfile) error {
 	rf.mu.Lock()
 	source.mu.RLock()
 
-	// Copy source dirtymark
-	rf.meta.Dirtymark = source.meta.Dirtymark
-
 	// Calculate oldest allowed epoch
+	// IMPORTANT: Check dirtymark BEFORE copying (Perl does comparison before assignment)
 	var oldestAllowed Epoch
 	if rf.meta.Dirtymark != source.meta.Dirtymark {
 		// Dirtymarks differ, keep everything
 		oldestAllowed = 0
-	} else {
-		// Calculate cutoff based on interval duration
+	} else if rf.meta.Merged != nil && !rf.meta.Merged.Epoch.IsZero() {
+		// Target has merged metadata - calculate cutoff
+		// Perl: } elsif (my $merged = $self->merged) {
 		now := EpochNow()
 		nowFloat := EpochToFloat(now)
 		intervalSecs := rf.IntervalSecs()
@@ -147,18 +151,13 @@ func (rf *Recentfile) MergeFrom(source *Recentfile) error {
 			intervalCutoff = EpochFromFloat(cutoffFloat)
 		}
 
-		// Use minimum of interval cutoff and merged epoch (if available)
-		// This matches Perl: min($epoch - $secs, $merged->{epoch}||0)
-		if rf.meta.Merged != nil && !rf.meta.Merged.Epoch.IsZero() {
-			mergedEpoch := rf.meta.Merged.Epoch
-			// Use the smaller (earlier) epoch to be more permissive
-			if !intervalCutoff.IsZero() && EpochLt(intervalCutoff, mergedEpoch) {
-				oldestAllowed = intervalCutoff
-			} else {
-				oldestAllowed = mergedEpoch
-			}
-		} else {
+		// Use minimum of interval cutoff and merged epoch
+		// Perl: $oldest_allowed = min($epoch - $secs, $merged->{epoch}||0)
+		mergedEpoch := rf.meta.Merged.Epoch
+		if !intervalCutoff.IsZero() && EpochLt(intervalCutoff, mergedEpoch) {
 			oldestAllowed = intervalCutoff
+		} else {
+			oldestAllowed = mergedEpoch
 		}
 
 		// Adjust if source has older events than oldest_allowed
@@ -170,6 +169,10 @@ func (rf *Recentfile) MergeFrom(source *Recentfile) error {
 				oldestAllowed = sourceOldest
 			}
 		}
+	} else {
+		// No merged metadata - keep everything (first merge)
+		// Perl: $oldest_allowed stays at 0 if no merged metadata exists
+		oldestAllowed = 0
 	}
 
 	// Merge events from both
@@ -220,11 +223,18 @@ func (rf *Recentfile) MergeFrom(source *Recentfile) error {
 	// Handle epoch conflicts (very rare)
 	newRecent = rf.DeduplicateEpochs(newRecent)
 
-	// Truncate old events
-	rf.recent = rf.truncate(newRecent)
+	// Don't truncate - filtering already happened via oldestAllowed
+	// Perl writes merged events directly without additional truncation
+	rf.recent = newRecent
 
 	// Update minmax
 	rf.updateMinmax()
+
+	// Copy source dirtymark (Perl does this after filtering, before write)
+	// Perl: if (!$self->dirtymark || $other->dirtymark ne $self->dirtymark)
+	if rf.meta.Dirtymark.IsZero() || rf.meta.Dirtymark != source.meta.Dirtymark {
+		rf.meta.Dirtymark = source.meta.Dirtymark
+	}
 
 	source.mu.RUnlock()
 	rf.mu.Unlock()

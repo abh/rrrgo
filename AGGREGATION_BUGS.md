@@ -1,8 +1,9 @@
 # Critical Bugs in Aggregation System
 
-**Date:** 2025-10-20
-**Issue:** Perl client repeatedly fetches 6h RECENT file every ~10 seconds
-**Root Cause:** Four distinct bugs in Go aggregation implementation causing bloated RECENT files and client sync failures
+**Initial Report:** 2025-10-20 - 6h file bloat (59K events, 10+ days)
+**Follow-up:** 2025-10-22 - Aggregation chain stops at 1d, won't progress to 1W
+
+**Root Cause:** Eight distinct bugs in Go aggregation implementation
 
 ## Fix Status
 
@@ -10,8 +11,10 @@
 - **Bug #2**: ✅ FIXED in commit `891892e` - "fix(aggregation): fix event truncation and chaining"
 - **Bug #3**: ✅ FIXED in commit `891892e` - "fix(aggregation): fix event truncation and chaining"
 - **Bug #4**: ✅ FIXED in commit `7c66343` - "fix(recentfile): maintain 10µs quantization in epoch increment"
-
-**All critical aggregation bugs have been resolved!**
+- **Bug #5**: ✅ FIXED - Wrong interval used for age checking (blocks chain progression)
+- **Bug #6**: ✅ FIXED - Aggressive truncation on first merge (no merged metadata)
+- **Bug #7**: ✅ FIXED - Dirtymark copied before comparison (always equal)
+- **Bug #8**: ✅ FIXED - Calling truncate() after merge (double filtering)
 
 ## Problem Summary
 
@@ -454,6 +457,158 @@ Sync 1760977398 (2/30/1h) ports/oses/ubuntu.tt_data ...
 
 ---
 
+## Bug #5: Wrong interval used for age checking (chain stops prematurely)
+
+**Status:** ✅ FIXED in commit TBD
+
+**File:** `recentfile/aggregation.go:58-62`
+
+**Problem discovered:** 2025-10-22 - 1W file not updating despite 1d file being active
+
+**Current Code (WRONG):**
+```go
+prevInterval := rf.interval  // "1h"
+for _, targetInterval := range targetIntervals {
+    shouldMerge := force || prevInterval == rf.interval
+    if !shouldMerge {
+        shouldMerge = shouldMergeByAge(target, prevInterval)  // ❌ Wrong interval!
+    }
+    // ...
+    prevInterval = targetInterval  // ❌ Sets to TARGET interval
+    source = target
+}
+```
+
+**Issue:**
+When merging 1d → 1W:
+- `prevInterval = "1d"` (set from previous iteration's target)
+- Checks: "Is 1W file older than 1d (86,400 seconds)?"
+- 1W was updated 13 hours ago (46,800 seconds)
+- 46,800 < 86,400 → **Merge blocked!**
+
+**Perl Logic (CORRECT):**
+```perl
+for my $i (0..$#aggs-1) {
+    my $this = $aggs[$i]{object};      # Current source
+    my $next = ...;                     # Target
+    my $prev = $aggs[$i-1]{object};    # ✅ Previous level (BEFORE source)
+
+    if ($next_age > $prev->interval_secs) {
+        $want_merge = 1;
+    }
+}
+```
+
+When merging 1d → 1W (i=2):
+- `$this = $aggs[2]` = 1d file
+- `$next` = 1W file
+- `$prev = $aggs[1]` = **6h file**
+- Checks: "Is 1W older than 6h (21,600 seconds)?"
+- 46,800 > 21,600 → **Merge happens!**
+
+**Why This Matters:**
+The aggregation needs to check if the target is old enough relative to the PREVIOUS source (the level before current), not the current source. This ensures each level updates at appropriate intervals:
+
+- 1h → 6h: Check 6h age vs 1h interval (3,600 sec) → Updates frequently
+- 6h → 1d: Check 1d age vs 1h interval (3,600 sec) → Updates when 1h changes
+- 1d → 1W: Check 1W age vs **6h interval** (21,600 sec) → Updates when 6h changes
+- etc.
+
+**Fix:**
+```go
+prevSourceInterval := rf.interval  // Track interval of level BEFORE current source
+
+for _, targetInterval := range targetIntervals {
+    shouldMerge := force || source.interval == rf.interval  // First iteration check
+    if !shouldMerge {
+        // ✅ Check against PREVIOUS source interval
+        shouldMerge = shouldMergeByAge(target, prevSourceInterval)
+    }
+    // ...
+    prevSourceInterval = source.interval  // ✅ Save CURRENT source before moving
+    source = target
+}
+```
+
+**Impact:**
+- **Before fix:** Chain stops at 1d, bloat never migrates to 1W/1M/etc.
+- **After fix:** Chain progresses correctly, bloat migrates up hierarchy and gets diluted
+
+**Symptoms:**
+```
+1d  60110 events, 1269.6% utilization  ← Bloated, not draining
+1W   3315 events, 143.7% utilization   ← Stale, not updating
+```
+
+---
+
+## Bug #6: Aggressive truncation on first merge (no merged metadata)
+
+**Status:** ✅ FIXED in commit TBD
+
+**File:** `recentfile/aggregation.go:160-162`
+
+**Current Code (WRONG):**
+```go
+if rf.meta.Merged != nil && !rf.meta.Merged.Epoch.IsZero() {
+    oldestAllowed = min(intervalCutoff, mergedEpoch)
+} else {
+    oldestAllowed = intervalCutoff  // ❌ Too aggressive!
+}
+```
+
+**Issue:**
+When a RECENT file is first created (no merged metadata yet), `oldestAllowed` is set to `now - interval`, which immediately truncates events older than the interval. This is wrong for first merges.
+
+**Example:**
+- New 1W file created
+- No merged metadata yet
+- oldestAllowed = now - 604,800 (1 week)
+- Events from 10 days ago get dropped even though they should be preserved during initial population
+
+**Perl Logic (CORRECT):**
+```perl
+my $oldest_allowed = 0;  # Initialize to 0
+
+if ($epoch) {
+    if (($other->dirtymark||0) ne ($self->dirtymark||0)) {
+        $oldest_allowed = 0;
+    } elsif (my $merged = $self->merged) {  # ✅ Only if merged exists
+        my $secs = $self->interval_secs();
+        $oldest_allowed = min($epoch - $secs, $merged->{epoch}||0);
+    }
+    # ✅ If no merged, stays at 0
+}
+```
+
+**Why This Matters:**
+First merges should be permissive - they're populating a new file from scratch. Aggressive truncation prevents proper initialization and causes events to be lost during the first aggregation cycle.
+
+**Fix:**
+```go
+var oldestAllowed Epoch  // Defaults to 0
+
+if rf.meta.Dirtymark != source.meta.Dirtymark {
+    oldestAllowed = 0
+} else if rf.meta.Merged != nil && !rf.meta.Merged.Epoch.IsZero() {
+    // ✅ Only calculate cutoff if merged metadata exists
+    now := EpochNow()
+    intervalSecs := rf.IntervalSecs()
+    intervalCutoff := now - intervalSecs
+    oldestAllowed = min(intervalCutoff, rf.meta.Merged.Epoch)
+    // ... adjustment logic ...
+} else {
+    // ✅ No merged metadata - keep everything
+    oldestAllowed = 0
+}
+```
+
+**Impact:**
+- **Before fix:** New RECENT files lose historical events on first population
+- **After fix:** First merge preserves all events, subsequent merges truncate normally
+
+---
+
 ## References
 
 - Perl implementation: `/Users/ask/src/rersyncrecent/lib/File/Rsync/Mirror/Recentfile.pm`
@@ -463,3 +618,113 @@ Sync 1760977398 (2/30/1h) ports/oses/ubuntu.tt_data ...
   - `_increase_a_bit()`: lines 2195-2200
 - Go quantization fix: commit 11788dc
 - Perl docs: `perldoc File::Rsync::Mirror::Recentfile`
+---
+
+## Bug #7: Dirtymark copied before comparison (always equal)
+
+**Status:** ✅ FIXED
+
+**File:** `recentfile/aggregation.go:136-141` (before fix)
+
+**Problem:**
+MergeFrom copied the source's dirtymark to the target BEFORE comparing them, making them always equal and bypassing the "keep everything" logic.
+
+```go
+// WRONG - copy first, then compare
+rf.meta.Dirtymark = source.meta.Dirtymark
+
+if rf.meta.Dirtymark \!= source.meta.Dirtymark {  // Always false\!
+    oldestAllowed = 0
+}
+```
+
+**Perl Logic:**
+Perl compares dirtymarks first, does all filtering, THEN copies at the end:
+
+```perl
+# Lines 902-918: Compare dirtymarks, calculate oldest_allowed
+
+if (($other->dirtymark||0) ne ($self->dirtymark||0)) {
+    $oldest_allowed = 0;
+}
+
+# ... filtering logic ...
+
+# Lines 975-978: Copy AFTER filtering
+if (\!$self->dirtymark || $other->dirtymark ne $self->dirtymark) {
+    $self->dirtymark ($other->dirtymark);
+}
+$self->write_recent($recent);
+```
+
+**Fix:**
+```go
+// Compare dirtymarks BEFORE copying
+if rf.meta.Dirtymark \!= source.meta.Dirtymark {
+    oldestAllowed = 0
+}
+
+// ... merge logic ...
+
+// Copy dirtymark AFTER filtering, before write
+if rf.meta.Dirtymark.IsZero() || rf.meta.Dirtymark \!= source.meta.Dirtymark {
+    rf.meta.Dirtymark = source.meta.Dirtymark
+}
+```
+
+**Impact:**
+- **Before fix:** Dirtymark changes never triggered "keep everything" mode
+- **After fix:** Dirtymark mismatches correctly preserve all events during merge
+
+---
+
+## Bug #8: Calling truncate() after merge (double filtering)
+
+**Status:** ✅ FIXED
+
+**File:** `recentfile/aggregation.go:227` (before fix)
+
+**Problem:**
+MergeFrom called `truncate()` after the merge, applying interval-based filtering on top of the already-correct oldestAllowed filtering. This caused events to be dropped even when they should be kept.
+
+```go
+// Merge events with oldestAllowed filtering
+rf.recent = rf.truncate(newRecent)  // WRONG - filters again\!
+```
+
+The truncate() function aggressively filters based on interval:
+```go
+func (rf *Recentfile) truncate(events []Event) []Event {
+    if rf.meta.Merged \!= nil {
+        cutoff = rf.meta.Merged.Epoch
+    } else {
+        cutoff = now - intervalSecs  // Aggressive for first merge\!
+    }
+    // Filters out events older than cutoff
+}
+```
+
+**Perl Logic:**
+Perl writes merged events directly without additional truncation:
+
+```perl
+# Line 980: Write directly, no truncation
+$self->write_recent($recent);
+```
+
+**Fix:**
+```go
+// Don't truncate - filtering already happened via oldestAllowed
+// Perl writes merged events directly without additional truncation
+rf.recent = newRecent
+```
+
+**Impact:**
+- **Before fix:** Events correctly preserved by dirtymark logic were then removed by truncate()
+- **After fix:** Only oldestAllowed filtering applies, matching Perl behavior
+
+**Test Coverage:**
+`TestMergeFromFirstMergePreservesAllEvents` verifies that 10-day-old events are preserved when target has no merged metadata and dirtymarks differ.
+
+---
+
