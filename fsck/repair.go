@@ -188,20 +188,27 @@ func repairIndexOrphans(rec *recent.Recent, opts Options) error {
 			return nil
 		}
 
-		// Skip RECENT files themselves
+		// Skip RECENT files managed by rrr-server (only in root, not subdirectories)
 		baseName := filepath.Base(path)
 		if len(baseName) >= len(filenameRoot) && baseName[:len(filenameRoot)] == filenameRoot {
+			// Only skip RECENT files if they're in the root directory
+			// Subdirectory RECENT files (modules/RECENT-*, authors/RECENT.recent) are mirrored content
+			inRootDir := filepath.Dir(relPath) == "."
+
 			// Check for .recent symlink
-			if baseName == filenameRoot+".recent" {
-				return nil
+			if baseName == filenameRoot+".recent" && inRootDir {
+				return nil // Skip root RECENT.recent (managed by rrr-server)
 			}
+
 			// Check if it's a RECENT file pattern (RECENT-*)
 			if len(baseName) > len(filenameRoot)+1 && baseName[len(filenameRoot)] == '-' {
-				// Looks like RECENT-*
-				if filepath.Ext(baseName) == serializerSuffix ||
-					filepath.Ext(baseName) == ".lock" ||
-					filepath.Ext(baseName) == ".new" {
-					return nil // Skip RECENT files
+				// Skip only root RECENT-* files, not subdirectory ones
+				if inRootDir {
+					if filepath.Ext(baseName) == serializerSuffix ||
+						filepath.Ext(baseName) == ".lock" ||
+						filepath.Ext(baseName) == ".new" {
+						return nil // Skip root RECENT-* files
+					}
 				}
 			}
 		}
@@ -295,16 +302,26 @@ func repairIndexMismatches(rec *recent.Recent, opts Options) error {
 			return nil
 		}
 
-		// Skip RECENT files themselves
+		// Skip RECENT files managed by rrr-server (only in root, not subdirectories)
 		if len(baseName) >= len(filenameRoot) && baseName[:len(filenameRoot)] == filenameRoot {
-			if baseName == filenameRoot+".recent" {
-				return nil
+			// Only skip RECENT files if they're in the root directory
+			// Subdirectory RECENT files (modules/RECENT-*, authors/RECENT.recent) are mirrored content
+			inRootDir := filepath.Dir(relPath) == "."
+
+			// Check for .recent symlink
+			if baseName == filenameRoot+".recent" && inRootDir {
+				return nil // Skip root RECENT.recent (managed by rrr-server)
 			}
+
+			// Check if it's a RECENT file pattern (RECENT-*)
 			if len(baseName) > len(filenameRoot)+1 && baseName[len(filenameRoot)] == '-' {
-				if filepath.Ext(baseName) == serializerSuffix ||
-					filepath.Ext(baseName) == ".lock" ||
-					filepath.Ext(baseName) == ".new" {
-					return nil
+				// Skip only root RECENT-* files, not subdirectory ones
+				if inRootDir {
+					if filepath.Ext(baseName) == serializerSuffix ||
+						filepath.Ext(baseName) == ".lock" ||
+						filepath.Ext(baseName) == ".new" {
+						return nil // Skip root RECENT-* files
+					}
 				}
 			}
 		}
