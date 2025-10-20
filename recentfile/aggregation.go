@@ -161,12 +161,12 @@ func (rf *Recentfile) MergeFrom(source *Recentfile) error {
 			oldestAllowed = intervalCutoff
 		}
 
-		// Adjust if source has newer events than oldest_allowed
-		// Perl: if (@$other_recent && $other_recent->[-1]{epoch} > $oldest_allowed)
-		// This prevents keeping stale events after extended downtime
+		// Adjust if source has older events than oldest_allowed
+		// Perl: if (@$other_recent && $other_recent->[-1]{epoch} < $oldest_allowed)
+		// If source's oldest event is older than our cutoff, use it instead (more permissive)
 		if len(source.recent) > 0 {
 			sourceOldest := source.recent[len(source.recent)-1].Epoch
-			if !oldestAllowed.IsZero() && EpochGt(sourceOldest, oldestAllowed) {
+			if !oldestAllowed.IsZero() && EpochLt(sourceOldest, oldestAllowed) {
 				oldestAllowed = sourceOldest
 			}
 		}

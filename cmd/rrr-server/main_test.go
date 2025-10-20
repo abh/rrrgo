@@ -37,6 +37,7 @@ func TestServerIntegration(t *testing.T) {
 		"--batch-size", "10",
 		"--batch-delay", "100ms",
 		"--aggregate-interval", "1s",
+		"--skip-fsck", // Skip startup fsck since we create files after server starts
 		"--verbose",
 	)
 
