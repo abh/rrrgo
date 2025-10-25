@@ -4,15 +4,18 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"go.ntppool.org/common/health"
 	"go.ntppool.org/common/logger"
 	"go.ntppool.org/common/metricsserver"
 	"go.ntppool.org/common/version"
@@ -37,6 +40,7 @@ type CLI struct {
 	AggregateInterval time.Duration `default:"5m" help:"How often to run aggregation."`
 
 	MetricsPort int    `default:"9090" help:"Port for metrics server."`
+	HealthPort  int    `default:"9082" help:"Port for health/readiness server."`
 	LogLevel    string `default:"info" help:"Log level (debug, info, warn, error)."`
 
 	SkipFsck   bool `help:"Skip startup integrity check."`
@@ -114,7 +118,11 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 		"batch_delay", cli.BatchDelay,
 		"aggregate_interval", cli.AggregateInterval,
 		"metrics_port", cli.MetricsPort,
+		"health_port", cli.HealthPort,
 	)
+
+	// Track readiness state
+	var ready atomic.Bool
 
 	// Start metrics server
 	metricsSrv := metricsserver.New()
@@ -170,6 +178,26 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 		log.Info("metrics server starting", "port", cli.MetricsPort)
 		if err := metricsSrv.ListenAndServe(ctx, cli.MetricsPort); err != nil {
 			log.Error("metrics server error", "error", err)
+		}
+	}()
+
+	// Start health server with readiness handler
+	healthSrv := health.NewServer(nil,
+		health.WithReadinessHandler(func(w http.ResponseWriter, r *http.Request) {
+			if ready.Load() {
+				w.WriteHeader(http.StatusOK)
+			} else {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}
+		}),
+		health.WithServiceName("rrr-server"),
+	)
+	healthSrv.SetLogger(log)
+
+	go func() {
+		log.Info("health server starting", "port", cli.HealthPort)
+		if err := healthSrv.Listen(ctx, cli.HealthPort); err != nil {
+			log.Error("health server error", "error", err)
 		}
 	}()
 
@@ -244,6 +272,9 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 
 	log.Info("watcher started")
 
+	// Mark server as ready now that watcher is running
+	ready.Store(true)
+
 	// Create server struct
 	srv := &server{
 		rec:     rec,
@@ -268,6 +299,9 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 
 	sig := <-sigChan
 	log.Info("received shutdown signal", "signal", sig.String())
+
+	// Mark server as not ready during shutdown
+	ready.Store(false)
 
 	// Stop metrics reporter
 	close(stopMetrics)
