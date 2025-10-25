@@ -758,3 +758,114 @@ func TestMergeFromFirstMergePreservesAllEvents(t *testing.T) {
 		t.Error("old_file.txt from 10 days ago should be kept when no merged metadata exists")
 	}
 }
+
+// TestMultiFileCoverageInvariant tests that events remain visible in multiple
+// RECENT files simultaneously during their lifetime (GitHub issue #3).
+// A 4-hour-old file should appear in BOTH 6h and 1d files, not just 1d.
+func TestMultiFileCoverageInvariant(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	now := EpochNow()
+	nowFloat := EpochToFloat(now)
+
+	// Create principal with full aggregation chain
+	principal := New(
+		WithLocalRoot(tmpDir),
+		WithInterval("1h"),
+		WithAggregator([]string{"6h", "1d", "1W"}),
+	)
+
+	// Add an event 4 hours ago
+	epoch4hAgo := EpochFromFloat(nowFloat - 4*3600)
+	principal.mu.Lock()
+	principal.recent = []Event{
+		{Path: "file_4h_old.txt", Type: "new", Epoch: epoch4hAgo},
+	}
+	principal.mu.Unlock()
+	principal.Write()
+
+	// Run initial aggregation to populate all files
+	if err := principal.Aggregate(true); err != nil {
+		t.Fatalf("Initial aggregate failed: %v", err)
+	}
+
+	// Verify event appears in multiple files
+	// At 4 hours old, it should be in:
+	// - NOT in 1h (older than 1 hour)
+	// - YES in 6h (within 6 hours)
+	// - YES in 1d (within 1 day)
+	// - YES in 1W (within 1 week)
+
+	rf1h, _ := NewFromFile(filepath.Join(tmpDir, "RECENT-1h.yaml"))
+	rf6h, _ := NewFromFile(filepath.Join(tmpDir, "RECENT-6h.yaml"))
+	rf1d, _ := NewFromFile(filepath.Join(tmpDir, "RECENT-1d.yaml"))
+	rf1W, _ := NewFromFile(filepath.Join(tmpDir, "RECENT-1W.yaml"))
+
+	// Helper to check if event exists in file
+	hasEvent := func(rf *Recentfile, path string) bool {
+		for _, e := range rf.recent {
+			if e.Path == path {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 1h should NOT have the 4-hour-old event
+	if hasEvent(rf1h, "file_4h_old.txt") {
+		t.Error("1h file should NOT contain 4-hour-old event (outside its interval)")
+	}
+
+	// 6h MUST have the 4-hour-old event (THIS WAS THE BUG)
+	if !hasEvent(rf6h, "file_4h_old.txt") {
+		t.Error("6h file MUST contain 4-hour-old event (Multi-File Coverage Invariant violation)")
+		t.Errorf("  6h minmax: %+v", rf6h.meta.Minmax)
+		t.Errorf("  Event epoch: %v (%.2f hours ago)", epoch4hAgo, 4.0)
+	}
+
+	// 1d MUST have the 4-hour-old event
+	if !hasEvent(rf1d, "file_4h_old.txt") {
+		t.Error("1d file MUST contain 4-hour-old event")
+	}
+
+	// 1W MUST have the 4-hour-old event
+	if !hasEvent(rf1W, "file_4h_old.txt") {
+		t.Error("1W file MUST contain 4-hour-old event")
+	}
+
+	// Verify 6h file span
+	if rf6h.meta.Minmax != nil {
+		span := EpochToFloat(rf6h.meta.Minmax.Max) - EpochToFloat(rf6h.meta.Minmax.Min)
+		expectedSpan := 6.0 * 3600.0 // 6 hours in seconds
+		// Allow some tolerance since we only have one event
+		if span < expectedSpan*0.5 {
+			t.Logf("Warning: 6h file span is %.1f seconds (%.1f%% of expected 6h)",
+				span, span/expectedSpan*100)
+		}
+	}
+
+	// Now simulate what happens after more time passes
+	// Add a new event (current time) and aggregate again
+	time.Sleep(10 * time.Millisecond)
+	principal.BatchUpdate([]BatchItem{{Path: "new_file.txt", Type: "new"}})
+
+	if err := principal.Aggregate(false); err != nil {
+		t.Fatalf("Second aggregate failed: %v", err)
+	}
+
+	// Re-read files
+	rf1h, _ = NewFromFile(filepath.Join(tmpDir, "RECENT-1h.yaml"))
+	rf6h, _ = NewFromFile(filepath.Join(tmpDir, "RECENT-6h.yaml"))
+	rf1d, _ = NewFromFile(filepath.Join(tmpDir, "RECENT-1d.yaml"))
+
+	// The 4-hour-old event should STILL be in 6h and 1d
+	// (It hasn't aged past their intervals yet)
+	if !hasEvent(rf6h, "file_4h_old.txt") {
+		t.Error("After second aggregation, 6h file should STILL contain 4-hour-old event")
+		t.Error("This indicates premature truncation (GitHub issue #3)")
+	}
+
+	if !hasEvent(rf1d, "file_4h_old.txt") {
+		t.Error("After second aggregation, 1d file should STILL contain 4-hour-old event")
+	}
+}

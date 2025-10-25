@@ -82,10 +82,19 @@ func (rf *Recentfile) Aggregate(force bool) error {
 		}
 		source.mu.Unlock()
 
-		// Write source file to persist merged metadata (needed for next aggregation cycle)
+		// Truncate source file to remove events older than its interval
+		// This maintains the Multi-File Coverage Invariant (GitHub issue #3)
+		// Events should remain in multiple files during their lifetime, but
+		// should be removed from smaller interval files once they age out
 		if err := source.Lock(); err != nil {
 			return fmt.Errorf("lock source %s: %w", source.interval, err)
 		}
+		source.mu.Lock()
+		source.recent = source.truncate(source.recent)
+		source.updateMinmax()
+		source.mu.Unlock()
+
+		// Write source file to persist merged metadata and truncated events
 		if err := source.Write(); err != nil {
 			source.Unlock()
 			return fmt.Errorf("write source %s: %w", source.interval, err)

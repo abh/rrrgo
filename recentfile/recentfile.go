@@ -574,26 +574,19 @@ func (rf *Recentfile) truncate(events []Event) []Event {
 		return events
 	}
 
-	// Calculate cutoff epoch
-	var cutoff Epoch
-	if rf.meta.Merged != nil && !rf.meta.Merged.Epoch.IsZero() {
-		// Use merged epoch as cutoff
-		cutoff = rf.meta.Merged.Epoch
-	} else {
-		// Calculate cutoff based on interval
-		intervalSecs := rf.IntervalSecs()
-		if intervalSecs == ZSeconds {
-			// Z interval keeps everything
-			return events
-		}
-
-		now := EpochNow()
-		nowFloat := EpochToFloat(now)
-		cutoffFloat := nowFloat - float64(intervalSecs)
-		cutoff = EpochFromFloat(cutoffFloat)
+	// Calculate cutoff based on interval
+	intervalSecs := rf.IntervalSecs()
+	if intervalSecs == ZSeconds {
+		// Z interval keeps everything
+		return events
 	}
 
-	// Find first event >= cutoff
+	now := EpochNow()
+	nowFloat := EpochToFloat(now)
+	cutoffFloat := nowFloat - float64(intervalSecs)
+	cutoff := EpochFromFloat(cutoffFloat)
+
+	// Keep events >= cutoff (within the interval window)
 	result := make([]Event, 0, len(events))
 	for _, event := range events {
 		if EpochGe(event.Epoch, cutoff) {

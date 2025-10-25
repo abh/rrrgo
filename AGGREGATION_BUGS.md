@@ -2,8 +2,9 @@
 
 **Initial Report:** 2025-10-20 - 6h file bloat (59K events, 10+ days)
 **Follow-up:** 2025-10-22 - Aggregation chain stops at 1d, won't progress to 1W
+**Follow-up:** 2025-10-24 - Multi-File Coverage Invariant violation (GitHub issue #3)
 
-**Root Cause:** Eight distinct bugs in Go aggregation implementation
+**Root Cause:** Nine distinct bugs in Go aggregation implementation
 
 ## Fix Status
 
@@ -11,10 +12,11 @@
 - **Bug #2**: ✅ FIXED in commit `891892e` - "fix(aggregation): fix event truncation and chaining"
 - **Bug #3**: ✅ FIXED in commit `891892e` - "fix(aggregation): fix event truncation and chaining"
 - **Bug #4**: ✅ FIXED in commit `7c66343` - "fix(recentfile): maintain 10µs quantization in epoch increment"
-- **Bug #5**: ✅ FIXED - Wrong interval used for age checking (blocks chain progression)
-- **Bug #6**: ✅ FIXED - Aggressive truncation on first merge (no merged metadata)
-- **Bug #7**: ✅ FIXED - Dirtymark copied before comparison (always equal)
-- **Bug #8**: ✅ FIXED - Calling truncate() after merge (double filtering)
+- **Bug #5**: ✅ FIXED in commit `9c6e135` - "fix(aggregation): fix chain progression and merge filtering"
+- **Bug #6**: ✅ FIXED in commit `9c6e135` - "fix(aggregation): fix chain progression and merge filtering"
+- **Bug #7**: ✅ FIXED in commit `9c6e135` - "fix(aggregation): fix chain progression and merge filtering"
+- **Bug #8**: ✅ FIXED in commit `9c6e135` - "fix(aggregation): fix chain progression and merge filtering"
+- **Bug #9**: ✅ FIXED in commit `8fa67a6` - "fix(aggregation): maintain Multi-File Coverage Invariant (issue #3)"
 
 ## Problem Summary
 
@@ -725,6 +727,135 @@ rf.recent = newRecent
 
 **Test Coverage:**
 `TestMergeFromFirstMergePreservesAllEvents` verifies that 10-day-old events are preserved when target has no merged metadata and dirtymarks differ.
+
+---
+
+## Bug #9: Source files not truncated after merge (Multi-File Coverage Invariant violation)
+
+**Status:** ✅ FIXED in commit `8fa67a6`
+
+**GitHub Issue:** #3
+
+**File:** `recentfile/aggregation.go` and `recentfile/recentfile.go`
+
+**Problem discovered:** 2025-10-24 - 4-hour-old file missing from RECENT-6h
+
+**Symptom from GitHub issue #3:**
+```
+: >andreas@ssdnodes-629b09d13097a:~/cpanrsyncmonitor/CPAN% date
+: Fri Oct 24 07:04:03 UTC 2025
+# ^^ current time UTC is ~07:00
+
+: >andreas@ssdnodes-629b09d13097a:~/cpanrsyncmonitor/CPAN% ls -l authors/id/N/NH/NHUBBARD/App-sbozyp-0.6.1.tar.gz
+: -rw-r--r-- 1 andreas andreas 27598 2025-10-24 03:10:39 authors/id/N/NH/NHUBBARD/App-sbozyp-0.6.1.tar.gz
+# ^^ mtime UTC is ~03:00, the file is only 4 hours old
+
+: >andreas@ssdnodes-629b09d13097a:~/cpanrsyncmonitor/CPAN% grep 'NHUBBARD/App-sbozyp-0.6.1.tar.gz' RECENT-*.json
+: RECENT-1d.json:      "path": "authors/id/N/NH/NHUBBARD/App-sbozyp-0.6.1.tar.gz",
+# ^^ the file is only in the RECENT-1d, not in the RECENT-6h!
+```
+
+**Multi-File Coverage Invariant (from RRR-PROTOCOL.md section 3.4):**
+
+Events MUST appear in multiple RECENT files simultaneously during their lifetime. A 4-hour-old file should appear in:
+- NOT in RECENT-1h (older than 1 hour)
+- YES in RECENT-6h (within 6 hours) ✓ REQUIRED
+- YES in RECENT-1d (within 1 day) ✓
+- YES in RECENT-1W (within 1 week) ✓
+
+**Root Causes:**
+
+1. **Source files not truncated after merge** (aggregation.go)
+   - After `MergeFrom()` completed, source file retained ALL its events
+   - Events were filtered during merge but source file wasn't updated
+   - Old events accumulated in source files beyond their interval span
+
+2. **truncate() used wrong cutoff** (recentfile.go:579-581)
+   - Used `rf.meta.Merged.Epoch` as cutoff when it existed
+   - This kept EVERYTHING newer than the most recent merged event
+   - Should always use interval-based cutoff (now - intervalSecs)
+
+**Why This is Wrong:**
+
+The `merged.epoch` field represents "the newest event we merged into the larger file". Using it as a truncation cutoff means "keep everything newer than what we last merged" - which is basically everything!
+
+Example timeline:
+1. Aggregate runs at T=0, merges 1h → 6h
+2. Sets `rf.meta.Merged.Epoch` to newest event (e.g., epoch 1000)
+3. Next aggregate at T=1hour, tries to truncate 1h file
+4. Calls `truncate()` with `cutoff = 1000` (merged.epoch)
+5. Keeps ALL events >= 1000 (which is everything!)
+6. 4-hour-old events remain in 1h file forever
+
+**Correct Behavior:**
+
+The `merged.epoch` is used in `MergeFrom()` during merge filtering (to prevent re-merging already-processed events), but NOT for truncating the source file. Source files should always be truncated based on their interval (now - intervalSecs).
+
+**Fix #1: Truncate source after merge** (aggregation.go):
+```go
+// After merge completes and metadata is updated:
+if err := source.Lock(); err != nil {
+    return fmt.Errorf("lock source %s: %w", source.interval, err)
+}
+source.mu.Lock()
+source.recent = source.truncate(source.recent)  // ✅ Remove old events
+source.updateMinmax()
+source.mu.Unlock()
+
+// Write source file to persist merged metadata and truncated events
+if err := source.Write(); err != nil {
+    source.Unlock()
+    return fmt.Errorf("write source %s: %w", source.interval, err)
+}
+source.Unlock()
+```
+
+**Fix #2: Simplify truncate()** (recentfile.go):
+```go
+func (rf *Recentfile) truncate(events []Event) []Event {
+    if len(events) == 0 {
+        return events
+    }
+
+    // Calculate cutoff based on interval (ALWAYS, not merged.epoch)
+    intervalSecs := rf.IntervalSecs()
+    if intervalSecs == ZSeconds {
+        return events  // Z interval keeps everything
+    }
+
+    now := EpochNow()
+    nowFloat := EpochToFloat(now)
+    cutoffFloat := nowFloat - float64(intervalSecs)
+    cutoff := EpochFromFloat(cutoffFloat)
+
+    // Keep events >= cutoff (within the interval window)
+    result := make([]Event, 0, len(events))
+    for _, event := range events {
+        if EpochGe(event.Epoch, cutoff) {
+            result = append(result, event)
+        }
+    }
+
+    return result
+}
+```
+
+**Impact:**
+- **Before fix:** Events stayed in smaller interval files indefinitely, violating coverage invariant
+- **After fix:** Events age out of smaller files properly while remaining in larger files
+- **minmax spans:** Files now maintain proper spans (6h file spans ~6 hours, not partial coverage)
+
+**Test Coverage:**
+
+`TestMultiFileCoverageInvariant` verifies:
+1. 4-hour-old event appears in 6h, 1d, and 1W files (not just 1d)
+2. 4-hour-old event does NOT appear in 1h file (outside its interval)
+3. After second aggregation, event still appears in 6h and 1d (hasn't aged out yet)
+
+**References:**
+- GitHub issue #3: https://github.com/abh/rrrgo/issues/3
+- RRR-PROTOCOL.md section 3.4 "Multi-File Coverage Invariant"
+- Commit 8fa67a6: "fix(aggregation): maintain Multi-File Coverage Invariant (issue #3)"
 
 ---
 
