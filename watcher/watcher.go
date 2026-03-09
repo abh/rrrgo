@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -52,6 +53,9 @@ type Watcher struct {
 	// Verbose logging
 	verbose bool
 
+	// Structured logger
+	logger *slog.Logger
+
 	// Error callback
 	errorHandler func(error)
 
@@ -91,6 +95,13 @@ func WithBatchDelay(delay time.Duration) Option {
 func WithVerbose(v bool) Option {
 	return func(w *Watcher) {
 		w.verbose = v
+	}
+}
+
+// WithLogger sets the structured logger for the watcher.
+func WithLogger(logger *slog.Logger) Option {
+	return func(w *Watcher) {
+		w.logger = logger
 	}
 }
 
@@ -158,12 +169,24 @@ func New(rec *recent.Recent, opts ...Option) (*Watcher, error) {
 		ctx:          ctx,
 		cancel:       cancel,
 		lastFlush:    time.Now(),
-		errorHandler: func(err error) { fmt.Fprintf(os.Stderr, "watcher error: %v\n", err) },
+		errorHandler: nil,
 	}
 
 	// Apply options
 	for _, opt := range opts {
 		opt(w)
+	}
+
+	// Default logger if none provided
+	if w.logger == nil {
+		w.logger = slog.Default()
+	}
+
+	// Default error handler logs via slog
+	if w.errorHandler == nil {
+		w.errorHandler = func(err error) {
+			w.logger.Error("watcher error", "error", err)
+		}
 	}
 
 	return w, nil
@@ -251,14 +274,12 @@ func (w *Watcher) watchTree(root string) error {
 
 		// Add watch
 		if err := w.fsw.Add(path); err != nil {
-			if w.verbose {
-				fmt.Fprintf(os.Stderr, "warn: failed to watch %s: %v\n", path, err)
-			}
+			w.logger.Warn("failed to watch directory", "path", path, "error", err)
 			return nil // Continue anyway
 		}
 
 		if w.verbose {
-			fmt.Printf("Watching: %s\n", path)
+			w.logger.Debug("watching directory", "path", path)
 		}
 
 		return nil
@@ -374,7 +395,7 @@ func (w *Watcher) handleEvents(events []fsnotify.Event) {
 		}
 
 		if w.verbose {
-			fmt.Printf("Event: %s %s\n", typ, event.Name)
+			w.logger.Debug("event", "type", typ, "path", event.Name)
 		}
 
 		items = append(items, batchItem{path: event.Name, typ: typ})
@@ -448,7 +469,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	}
 
 	if w.verbose {
-		fmt.Printf("Event: %s %s\n", typ, event.Name)
+		w.logger.Debug("event", "type", typ, "path", event.Name)
 	}
 
 	// Send to batch channel
@@ -513,9 +534,7 @@ func (w *Watcher) batchProcessor() {
 			flushTimer.Reset(w.batchDelay)
 
 		case <-aggregateChan:
-			if w.verbose {
-				fmt.Println("Running periodic aggregation")
-			}
+			w.logger.Info("running periodic aggregation")
 			start := time.Now()
 			if err := w.recent.Aggregate(false); err != nil {
 				if w.errorHandler != nil {
@@ -548,9 +567,7 @@ func (w *Watcher) flushBatch() {
 	w.batch = nil
 	w.batchMu.Unlock()
 
-	if w.verbose {
-		fmt.Printf("Flushing batch: %d events\n", len(batch))
-	}
+	w.logger.Info("flushing batch", "events", len(batch))
 
 	// Deduplicate events (keep last event for each path)
 	deduped := w.deduplicateBatch(batch)
@@ -602,7 +619,7 @@ func (w *Watcher) deduplicateBatch(batch []recentfile.BatchItem) []recentfile.Ba
 	}
 
 	if w.verbose && len(result) < len(batch) {
-		fmt.Printf("Deduplicated: %d -> %d events\n", len(batch), len(result))
+		w.logger.Debug("deduplicated batch", "before", len(batch), "after", len(result))
 	}
 
 	return result
@@ -635,8 +652,17 @@ type Stats struct {
 // Enqueue sends an item through the watcher's batch channel for processing.
 // This allows external code (e.g., fsck repair) to serialize writes through
 // the watcher's batchProcessor goroutine, avoiding lock contention.
-// It blocks until the item is accepted or the context is cancelled.
+// It self-throttles when the channel is near-full, leaving headroom for
+// real-time fsnotify events.
 func (w *Watcher) Enqueue(ctx context.Context, path, typ string) error {
+	// Leave headroom for real-time fsnotify events
+	for len(w.batchChan) > cap(w.batchChan)*9/10 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	select {
 	case w.batchChan <- batchItem{path: path, typ: typ}:
 		return nil

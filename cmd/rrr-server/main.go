@@ -227,6 +227,7 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 		watcher.WithBatchDelay(cli.BatchDelay),
 		watcher.WithAggregateInterval(cli.AggregateInterval),
 		watcher.WithVerbose(cli.Verbose),
+		watcher.WithLogger(log),
 		watcher.WithErrorHandler(func(err error) {
 			log.Error("watcher error", "error", err)
 		}),
