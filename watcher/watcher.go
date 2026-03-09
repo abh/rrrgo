@@ -632,6 +632,19 @@ type Stats struct {
 	TimeSinceFlush time.Duration // Time since last flush
 }
 
+// Enqueue sends an item through the watcher's batch channel for processing.
+// This allows external code (e.g., fsck repair) to serialize writes through
+// the watcher's batchProcessor goroutine, avoiding lock contention.
+// It blocks until the item is accepted or the context is cancelled.
+func (w *Watcher) Enqueue(ctx context.Context, path, typ string) error {
+	select {
+	case w.batchChan <- batchItem{path: path, typ: typ}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // IsRunning returns true if the watcher is running.
 func (w *Watcher) IsRunning() bool {
 	w.runMu.RLock()

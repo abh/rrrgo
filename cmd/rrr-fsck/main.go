@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/alecthomas/kong"
 	"go.ntppool.org/common/version"
@@ -76,8 +79,11 @@ func run(cli *CLI) error {
 		fmt.Printf("Loaded: %s\n", rec.String())
 	}
 
-	// Run fsck
-	result, err := fsck.Run(rec, fsck.Options{
+	// Run fsck (cancellable via SIGINT/SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	result, err := fsck.Run(ctx, rec, fsck.Options{
 		Repair:     cli.Repair,
 		SkipEvents: cli.SkipEvents,
 		Verbose:    cli.Verbose,

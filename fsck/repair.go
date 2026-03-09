@@ -1,6 +1,7 @@
 package fsck
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,9 +10,36 @@ import (
 	"github.com/abh/rrrgo/recentfile"
 )
 
+// enqueueOrBatchUpdate sends batch items through EnqueueFunc if set, or does a
+// direct BatchUpdate. When using EnqueueFunc, items are sent one at a time
+// (blocking until accepted or context cancelled), which serializes writes
+// through the watcher's batch processor.
+func enqueueOrBatchUpdate(ctx context.Context, rec *recent.Recent, batch []recentfile.BatchItem, opts Options, enqueueMsg, directMsg string) error {
+	if opts.EnqueueFunc != nil {
+		enqueued := 0
+		for _, item := range batch {
+			if err := opts.EnqueueFunc(ctx, item.Path, item.Type); err != nil {
+				return fmt.Errorf("enqueue after %d items: %w", enqueued, err)
+			}
+			enqueued++
+			if enqueued%10000 == 0 {
+				opts.Logger.Info("enqueue progress", "enqueued", enqueued, "total", len(batch))
+			}
+		}
+		opts.Logger.Info(enqueueMsg, "count", enqueued)
+	} else {
+		principal := rec.PrincipalRecentfile()
+		if err := principal.BatchUpdate(batch); err != nil {
+			return fmt.Errorf("batch update: %w", err)
+		}
+		opts.Logger.Info(directMsg, "count", len(batch), "file", filepath.Base(principal.Rfile()))
+	}
+	return nil
+}
+
 // repairIssues attempts to fix issues found during validation.
 // Returns epoch repair statistics: (epochsQuantized, epochsDeduplicated, error)
-func repairIssues(rec *recent.Recent, opts Options) (int, int, error) {
+func repairIssues(ctx context.Context, rec *recent.Recent, opts Options) (int, int, error) {
 	// Ensure all files exist
 	if opts.Verbose {
 		opts.Logger.Debug("ensuring all recentfiles exist")
@@ -26,12 +54,12 @@ func repairIssues(rec *recent.Recent, opts Options) (int, int, error) {
 	}
 
 	// Repair disk→index mismatches (files on disk but not in index)
-	if err := repairIndexOrphans(rec, opts); err != nil {
+	if err := repairIndexOrphans(ctx, rec, opts); err != nil {
 		return 0, 0, err
 	}
 
 	// Repair index→disk mismatches (files in index but not on disk)
-	if err := repairIndexMismatches(rec, opts); err != nil {
+	if err := repairIndexMismatches(ctx, rec, opts); err != nil {
 		return 0, 0, err
 	}
 
@@ -138,7 +166,7 @@ func repairEpochsInFile(rf *recentfile.Recentfile, opts Options) (quantized int,
 
 // repairIndexOrphans adds files on disk but not in index to the principal RECENT file.
 // Disk is considered authoritative.
-func repairIndexOrphans(rec *recent.Recent, opts Options) error {
+func repairIndexOrphans(ctx context.Context, rec *recent.Recent, opts Options) error {
 	localRoot := rec.LocalRoot()
 
 	if opts.Verbose {
@@ -188,29 +216,9 @@ func repairIndexOrphans(rec *recent.Recent, opts Options) error {
 			return nil
 		}
 
-		// Skip RECENT files managed by rrr-server (only in root, not subdirectories)
 		baseName := filepath.Base(path)
-		if len(baseName) >= len(filenameRoot) && baseName[:len(filenameRoot)] == filenameRoot {
-			// Only skip RECENT files if they're in the root directory
-			// Subdirectory RECENT files (modules/RECENT-*, authors/RECENT.recent) are mirrored content
-			inRootDir := filepath.Dir(relPath) == "."
-
-			// Check for .recent symlink
-			if baseName == filenameRoot+".recent" && inRootDir {
-				return nil // Skip root RECENT.recent (managed by rrr-server)
-			}
-
-			// Check if it's a RECENT file pattern (RECENT-*)
-			if len(baseName) > len(filenameRoot)+1 && baseName[len(filenameRoot)] == '-' {
-				// Skip only root RECENT-* files, not subdirectory ones
-				if inRootDir {
-					if filepath.Ext(baseName) == serializerSuffix ||
-						filepath.Ext(baseName) == ".lock" ||
-						filepath.Ext(baseName) == ".new" {
-						return nil // Skip root RECENT-* files
-					}
-				}
-			}
+		if shouldSkipManagedFile(baseName, relPath, filenameRoot, serializerSuffix) {
+			return nil
 		}
 
 		// Check if in index
@@ -243,13 +251,9 @@ func repairIndexOrphans(rec *recent.Recent, opts Options) error {
 
 	opts.Logger.Info("adding files to index", "count", len(batch))
 
-	// Add to principal RECENT file
-	principal := rec.PrincipalRecentfile()
-	if err := principal.BatchUpdate(batch); err != nil {
-		return fmt.Errorf("batch update: %w", err)
+	if err := enqueueOrBatchUpdate(ctx, rec, batch, opts, "enqueued files for indexing", "added files to index"); err != nil {
+		return err
 	}
-
-	opts.Logger.Info("added files to index", "count", len(batch), "file", filepath.Base(principal.Rfile()))
 
 	return nil
 }
@@ -257,7 +261,7 @@ func repairIndexOrphans(rec *recent.Recent, opts Options) error {
 // repairIndexMismatches adds delete events for files in RECENT but not on disk.
 // Disk is considered authoritative - if a file is in the index but not on disk,
 // it means the file was deleted and we need to record that in the index.
-func repairIndexMismatches(rec *recent.Recent, opts Options) error {
+func repairIndexMismatches(ctx context.Context, rec *recent.Recent, opts Options) error {
 	localRoot := rec.LocalRoot()
 
 	if opts.Verbose {
@@ -303,28 +307,8 @@ func repairIndexMismatches(rec *recent.Recent, opts Options) error {
 			return nil
 		}
 
-		// Skip RECENT files managed by rrr-server (only in root, not subdirectories)
-		if len(baseName) >= len(filenameRoot) && baseName[:len(filenameRoot)] == filenameRoot {
-			// Only skip RECENT files if they're in the root directory
-			// Subdirectory RECENT files (modules/RECENT-*, authors/RECENT.recent) are mirrored content
-			inRootDir := filepath.Dir(relPath) == "."
-
-			// Check for .recent symlink
-			if baseName == filenameRoot+".recent" && inRootDir {
-				return nil // Skip root RECENT.recent (managed by rrr-server)
-			}
-
-			// Check if it's a RECENT file pattern (RECENT-*)
-			if len(baseName) > len(filenameRoot)+1 && baseName[len(filenameRoot)] == '-' {
-				// Skip only root RECENT-* files, not subdirectory ones
-				if inRootDir {
-					if filepath.Ext(baseName) == serializerSuffix ||
-						filepath.Ext(baseName) == ".lock" ||
-						filepath.Ext(baseName) == ".new" {
-						return nil // Skip root RECENT-* files
-					}
-				}
-			}
+		if shouldSkipManagedFile(baseName, relPath, filenameRoot, serializerSuffix) {
+			return nil
 		}
 
 		diskPaths[relPath] = true
@@ -377,13 +361,9 @@ func repairIndexMismatches(rec *recent.Recent, opts Options) error {
 		})
 	}
 
-	// Add to principal RECENT file
-	principal := rec.PrincipalRecentfile()
-	if err := principal.BatchUpdate(batch); err != nil {
-		return fmt.Errorf("batch update: %w", err)
+	if err := enqueueOrBatchUpdate(ctx, rec, batch, opts, "enqueued delete events for indexing", "added delete events"); err != nil {
+		return err
 	}
-
-	opts.Logger.Info("added delete events", "count", len(batch), "file", filepath.Base(principal.Rfile()))
 
 	return nil
 }

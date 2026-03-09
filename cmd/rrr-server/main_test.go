@@ -184,7 +184,7 @@ func TestCreateOrLoadRecent(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	// Test creating new collection (default YAML)
-	rec, err := createOrLoadRecent(tmpDir, "1h", "yaml", []string{"6h", "1d"}, log)
+	rec, err := createOrLoadRecent(tmpDir, "1h", "yaml", []string{"6h", "1d"}, false, log)
 	if err != nil {
 		t.Fatalf("createOrLoadRecent (new): %v", err)
 	}
@@ -205,7 +205,7 @@ func TestCreateOrLoadRecent(t *testing.T) {
 	}
 
 	// Test loading existing collection
-	rec2, err := createOrLoadRecent(tmpDir, "1h", "yaml", []string{"6h", "1d"}, log)
+	rec2, err := createOrLoadRecent(tmpDir, "1h", "yaml", []string{"6h", "1d"}, false, log)
 	if err != nil {
 		t.Fatalf("createOrLoadRecent (load): %v", err)
 	}
@@ -227,7 +227,7 @@ func TestCreateOrLoadRecentJSON(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	// Test creating new collection with JSON format
-	rec, err := createOrLoadRecent(tmpDir, "1h", "json", []string{"6h", "1d"}, log)
+	rec, err := createOrLoadRecent(tmpDir, "1h", "json", []string{"6h", "1d"}, false, log)
 	if err != nil {
 		t.Fatalf("createOrLoadRecent (new, JSON): %v", err)
 	}
@@ -254,7 +254,7 @@ func TestCreateOrLoadRecentJSON(t *testing.T) {
 	}
 
 	// Test loading existing JSON collection
-	rec2, err := createOrLoadRecent(tmpDir, "1h", "json", []string{"6h", "1d"}, log)
+	rec2, err := createOrLoadRecent(tmpDir, "1h", "json", []string{"6h", "1d"}, false, log)
 	if err != nil {
 		t.Fatalf("createOrLoadRecent (load, JSON): %v", err)
 	}
@@ -276,7 +276,7 @@ func TestCreateOrLoadRecentYAMLDefault(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	// Test creating new collection with YAML format (default)
-	rec, err := createOrLoadRecent(tmpDir, "1h", "yaml", []string{"6h"}, log)
+	rec, err := createOrLoadRecent(tmpDir, "1h", "yaml", []string{"6h"}, false, log)
 	if err != nil {
 		t.Fatalf("createOrLoadRecent (new, YAML): %v", err)
 	}

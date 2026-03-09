@@ -193,17 +193,11 @@ func verifyEventsMatchFilesystem(rec *recent.Recent, opts Options) int {
 	// Now check only files where the most recent event is "new"
 	checked := 0
 	missing := 0
-	showedMissing := 0
-	maxSample := 1000
+	brokenSymlinks := 0
 
 	for path, event := range stateMap {
 		// Skip files where most recent event is "delete"
 		if event.Type == "delete" {
-			continue
-		}
-
-		// In non-verbose mode, only check a sample
-		if !opts.Verbose && checked >= maxSample {
 			continue
 		}
 
@@ -214,12 +208,13 @@ func verifyEventsMatchFilesystem(rec *recent.Recent, opts Options) int {
 		_, lstErr := os.Lstat(fullPath)
 		if lstErr != nil {
 			if os.IsNotExist(lstErr) {
-				if opts.Verbose || showedMissing < 10 {
-					opts.Logger.Warn("file in RECENT but not on disk", "path", path)
-					showedMissing++
-				}
 				missing++
 				issues++
+				if missing <= 10 {
+					opts.Logger.Warn("file in RECENT but not on disk", "path", path)
+				} else if missing%10000 == 0 {
+					opts.Logger.Warn("files in RECENT but not on disk so far", "count", missing, "checked", checked)
+				}
 			}
 			continue
 		}
@@ -227,21 +222,20 @@ func verifyEventsMatchFilesystem(rec *recent.Recent, opts Options) int {
 		// File/symlink exists, check if it's a broken symlink
 		_, statErr := os.Stat(fullPath)
 		if statErr != nil && os.IsNotExist(statErr) {
-			if opts.Verbose || showedMissing < 10 {
+			brokenSymlinks++
+			if brokenSymlinks <= 10 {
 				opts.Logger.Warn("broken symlink in RECENT", "path", path)
-				showedMissing++
 			}
 		}
-	}
-
-	if !opts.Verbose && len(stateMap) > maxSample {
-		opts.Logger.Info("checked sample", "checked", checked, "total_paths", len(stateMap))
 	}
 
 	if missing > 0 {
 		opts.Logger.Info("files in RECENT but not on disk", "missing", missing, "checked", checked)
 	} else if opts.Verbose {
 		opts.Logger.Debug("all files from events exist on disk", "checked", checked)
+	}
+	if brokenSymlinks > 0 {
+		opts.Logger.Info("broken symlinks in RECENT", "count", brokenSymlinks)
 	}
 
 	return issues
@@ -277,7 +271,6 @@ func verifyDiskMatchesIndex(rec *recent.Recent, opts Options) int {
 	// Walk directory tree and compare
 	filesOnDisk := 0
 	missingInIndex := 0
-	showedMissing := 0
 
 	err = filepath.Walk(localRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -309,28 +302,8 @@ func verifyDiskMatchesIndex(rec *recent.Recent, opts Options) int {
 			return nil
 		}
 
-		// Skip RECENT files managed by rrr-server (only in root, not subdirectories)
-		if len(baseName) >= len(filenameRoot) && baseName[:len(filenameRoot)] == filenameRoot {
-			// Only skip RECENT files if they're in the root directory
-			// Subdirectory RECENT files (modules/RECENT-*, authors/RECENT.recent) are mirrored content
-			inRootDir := filepath.Dir(relPath) == "."
-
-			// Check for .recent symlink
-			if baseName == filenameRoot+".recent" && inRootDir {
-				return nil // Skip root RECENT.recent (managed by rrr-server)
-			}
-
-			// Check if it's a RECENT file pattern (RECENT-*)
-			if len(baseName) > len(filenameRoot)+1 && baseName[len(filenameRoot)] == '-' {
-				// Skip only root RECENT-* files, not subdirectory ones
-				if inRootDir {
-					if filepath.Ext(baseName) == serializerSuffix ||
-						filepath.Ext(baseName) == ".lock" ||
-						filepath.Ext(baseName) == ".new" {
-						return nil // Skip root RECENT-* files
-					}
-				}
-			}
+		if shouldSkipManagedFile(baseName, relPath, filenameRoot, serializerSuffix) {
+			return nil
 		}
 
 		filesOnDisk++
@@ -340,9 +313,10 @@ func verifyDiskMatchesIndex(rec *recent.Recent, opts Options) int {
 			missingInIndex++
 			issues++
 
-			if opts.Verbose || showedMissing < 10 {
+			if missingInIndex <= 10 {
 				opts.Logger.Warn("file on disk but not in index", "path", relPath)
-				showedMissing++
+			} else if missingInIndex%10000 == 0 {
+				opts.Logger.Warn("files on disk but not in index so far", "count", missingInIndex, "scanned", filesOnDisk)
 			}
 		}
 
@@ -363,7 +337,7 @@ func verifyDiskMatchesIndex(rec *recent.Recent, opts Options) int {
 	}
 
 	if missingInIndex > 0 {
-		opts.Logger.Info("files on disk but not in index", "count", missingInIndex)
+		opts.Logger.Info("files on disk but not in index", "count", missingInIndex, "scanned", filesOnDisk)
 	} else if opts.Verbose {
 		opts.Logger.Debug("all files on disk are in the index", "count", filesOnDisk)
 	}

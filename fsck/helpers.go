@@ -3,10 +3,38 @@ package fsck
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/abh/rrrgo/recent"
 	"github.com/abh/rrrgo/recentfile"
 )
+
+// shouldSkipManagedFile returns true if the file is a root-level RECENT file
+// managed by rrr-server (RECENT-*.yaml, .lock, .new, RECENT.recent).
+// Subdirectory RECENT files (e.g., modules/RECENT-*) are mirrored content
+// and should NOT be skipped.
+func shouldSkipManagedFile(baseName, relPath, filenameRoot, serializerSuffix string) bool {
+	if !strings.HasPrefix(baseName, filenameRoot) {
+		return false
+	}
+
+	inRootDir := filepath.Dir(relPath) == "."
+
+	// Check for .recent symlink (e.g., RECENT.recent)
+	if baseName == filenameRoot+".recent" && inRootDir {
+		return true
+	}
+
+	// Check for RECENT-* pattern
+	if len(baseName) > len(filenameRoot)+1 && baseName[len(filenameRoot)] == '-' && inRootDir {
+		ext := filepath.Ext(baseName)
+		if ext == serializerSuffix || ext == ".lock" || ext == ".new" {
+			return true
+		}
+	}
+
+	return false
+}
 
 // buildCurrentIndexState returns paths that should exist on disk according to
 // the current state of all RECENT files (where most recent event type is "new").

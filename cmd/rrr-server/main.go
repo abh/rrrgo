@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -202,18 +203,14 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 		}
 	}()
 
-	// Create or load Recent collection
-	rec, err := createOrLoadRecent(localRoot, cli.Interval, cli.Format, cli.Aggregator, log)
+	// Create or load Recent collection (with --no-lock applied at construction)
+	log.Info("loading recent collection...")
+	rec, err := createOrLoadRecent(localRoot, cli.Interval, cli.Format, cli.Aggregator, cli.NoLock, log)
 	if err != nil {
 		return fmt.Errorf("create/load recent: %w", err)
 	}
 
 	log.Info("recent collection loaded", "collection", rec.String())
-
-	if cli.NoLock {
-		log.Info("file locking disabled (--no-lock)")
-		rec.SetSkipLock(true)
-	}
 
 	// Clean up stale lock directories from previous crashes
 	for _, rf := range rec.Recentfiles() {
@@ -223,37 +220,8 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 		}
 	}
 
-	// Run startup fsck (unless --skip-fsck)
-	if !cli.SkipFsck {
-		log.Info("running startup fsck", "auto_repair", cli.FsckRepair)
-
-		fsckOpts := fsck.Options{
-			Repair:     cli.FsckRepair,
-			SkipEvents: false, // Full check by default
-			Verbose:    cli.Verbose,
-			Logger:     log,
-		}
-
-		result, err := fsck.Run(rec, fsckOpts)
-		if err != nil {
-			return fmt.Errorf("startup fsck failed: %w", err)
-		}
-
-		if result.Issues > 0 {
-			if cli.FsckRepair {
-				log.Info("startup fsck repaired issues", "issues", result.Issues)
-			} else {
-				// Issues found but not repaired - fail startup
-				return fmt.Errorf("startup fsck found %d issues (use --fsck-repair to auto-fix)", result.Issues)
-			}
-		} else {
-			log.Debug("startup fsck completed with no issues")
-		}
-	} else {
-		log.Info("skipping startup fsck")
-	}
-
 	// Create watcher
+	log.Info("starting watcher...")
 	w, err := watcher.New(rec,
 		watcher.WithBatchSize(cli.BatchSize),
 		watcher.WithBatchDelay(cli.BatchDelay),
@@ -284,10 +252,50 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 		return fmt.Errorf("start watcher: %w", err)
 	}
 
-	log.Info("watcher started")
-
-	// Mark server as ready now that watcher is running
+	// Mark server as ready now that watcher is running (before fsck)
 	ready.Store(true)
+	log.Info("watcher started, server ready")
+
+	// Run fsck in background (unless --skip-fsck)
+	var fsckWg sync.WaitGroup
+	fsckCtx, fsckCancel := context.WithCancel(ctx)
+	defer fsckCancel()
+
+	if !cli.SkipFsck {
+		log.Info("starting background fsck...", "auto_repair", cli.FsckRepair)
+
+		fsckWg.Add(1)
+		go func() {
+			defer fsckWg.Done()
+
+			fsckOpts := fsck.Options{
+				Repair:      cli.FsckRepair,
+				SkipEvents:  false,
+				Verbose:     cli.Verbose,
+				Logger:      log,
+				EnqueueFunc: w.Enqueue,
+			}
+
+			result, err := fsck.Run(fsckCtx, rec, fsckOpts)
+			if err != nil {
+				log.Error("background fsck failed", "error", err)
+				return
+			}
+
+			if result.Issues > 0 {
+				log.Info("background fsck complete",
+					"issues", result.Issues,
+					"repaired", result.Repaired,
+					"epochs_quantized", result.EpochsQuantized,
+					"epochs_deduplicated", result.EpochsDeduplicated,
+				)
+			} else {
+				log.Info("background fsck complete, no issues found")
+			}
+		}()
+	} else {
+		log.Info("skipping startup fsck")
+	}
 
 	// Create server struct
 	srv := &server{
@@ -317,6 +325,10 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 	// Mark server as not ready during shutdown
 	ready.Store(false)
 
+	// Cancel background fsck and wait for it to finish before stopping watcher
+	fsckCancel()
+	fsckWg.Wait()
+
 	// Stop metrics reporter
 	close(stopMetrics)
 	<-metricsDone
@@ -344,11 +356,15 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 }
 
 // createOrLoadRecent creates a new Recent collection or loads an existing one.
-func createOrLoadRecent(localRoot, interval, format string, aggregator []string, log *slog.Logger) (*recent.Recent, error) {
+func createOrLoadRecent(localRoot, interval, format string, aggregator []string, noLock bool, log *slog.Logger) (*recent.Recent, error) {
 	// Normalize format to file extension
 	suffix := "." + format
 	if format == "yml" {
 		suffix = ".yaml"
+	}
+
+	if noLock {
+		log.Info("file locking disabled (--no-lock)")
 	}
 
 	// Check if principal recentfile exists
@@ -363,6 +379,7 @@ func createOrLoadRecent(localRoot, interval, format string, aggregator []string,
 			recentfile.WithInterval(interval),
 			recentfile.WithSerializerSuffix(suffix),
 			recentfile.WithAggregator(aggregator),
+			recentfile.WithSkipLock(noLock),
 		)
 
 		rec, err := recent.NewWithPrincipal(principal)
@@ -370,7 +387,6 @@ func createOrLoadRecent(localRoot, interval, format string, aggregator []string,
 			return nil, fmt.Errorf("new with principal: %w", err)
 		}
 
-		// Ensure all files exist
 		if err := rec.EnsureFilesExist(); err != nil {
 			return nil, fmt.Errorf("ensure files exist: %w", err)
 		}
@@ -386,9 +402,18 @@ func createOrLoadRecent(localRoot, interval, format string, aggregator []string,
 		return nil, fmt.Errorf("load recent: %w", err)
 	}
 
+	if noLock {
+		rec.SetSkipLock(true)
+	}
+
 	// Load all recentfiles from disk
 	if err := rec.LoadAll(); err != nil {
 		return nil, fmt.Errorf("load all: %w", err)
+	}
+
+	// Ensure all RECENT files exist (creates missing aggregated files like 6h, 1d, etc.)
+	if err := rec.EnsureFilesExist(); err != nil {
+		return nil, fmt.Errorf("ensure files exist: %w", err)
 	}
 
 	return rec, nil

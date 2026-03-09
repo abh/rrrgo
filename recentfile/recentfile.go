@@ -136,6 +136,13 @@ func WithSerializerSuffix(suffix string) Option {
 	}
 }
 
+// WithSkipLock disables file locking at construction time.
+func WithSkipLock(skip bool) Option {
+	return func(rf *Recentfile) {
+		rf.skipLock = skip
+	}
+}
+
 // New creates a new Recentfile with the given options.
 func New(opts ...Option) *Recentfile {
 	rf := &Recentfile{
@@ -405,6 +412,8 @@ func (rf *Recentfile) Verbose() bool {
 // Safe for single-writer deployments where Go's internal mutex
 // handles goroutine concurrency.
 func (rf *Recentfile) SetSkipLock(skip bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.skipLock = skip
 }
 

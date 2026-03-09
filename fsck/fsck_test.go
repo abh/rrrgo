@@ -1,6 +1,7 @@
 package fsck
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -122,7 +123,7 @@ func TestNewerDeleteEvent(t *testing.T) {
 
 	// File doesn't exist on disk (correctly deleted)
 
-	result, err := Run(rec, Options{Logger: quietLogger(), SkipEvents: false})
+	result, err := Run(context.Background(), rec, Options{Logger: quietLogger(), SkipEvents: false})
 	if err != nil {
 		t.Fatal(err)
 	}
