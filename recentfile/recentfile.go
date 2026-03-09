@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -464,9 +465,11 @@ func (rf *Recentfile) BatchUpdate(batch []BatchItem) error {
 	now := EpochNow()
 	processedBatch := make([]Event, 0, len(batch))
 
-	// We need to track the working list of events to ensure monotonicity
-	workingEvents := make([]Event, len(rf.recent))
-	copy(workingEvents, rf.recent)
+	// Track the max epoch to ensure monotonicity (events are sorted desc, [0] is max)
+	maxEpoch := Epoch(0)
+	if len(rf.recent) > 0 {
+		maxEpoch = rf.recent[0].Epoch
+	}
 
 	for _, item := range batch {
 		// Canonicalize path
@@ -479,15 +482,22 @@ func (rf *Recentfile) BatchUpdate(batch []BatchItem) error {
 		var epoch Epoch
 		if !item.Epoch.IsZero() && EpochLt(item.Epoch, now) {
 			// Dirty epoch (backdated)
-			epoch = rf.ensureMonotonic(item.Epoch, workingEvents)
+			epoch = item.Epoch
+			if EpochLe(epoch, maxEpoch) {
+				epoch = EpochIncreaseABit(maxEpoch)
+			}
 			// Set dirtymark
 			rf.meta.Dirtymark = now
 			// Clear merged info (forces re-aggregation)
 			rf.meta.Merged = nil
 		} else {
 			// Current epoch
-			epoch = rf.ensureMonotonic(now, workingEvents)
+			epoch = now
+			if EpochLe(epoch, maxEpoch) {
+				epoch = EpochIncreaseABit(maxEpoch)
+			}
 		}
+		maxEpoch = epoch
 
 		newEvent := Event{
 			Epoch: epoch,
@@ -495,9 +505,6 @@ func (rf *Recentfile) BatchUpdate(batch []BatchItem) error {
 			Type:  item.Type,
 		}
 		processedBatch = append(processedBatch, newEvent)
-
-		// Add to working events so next iteration sees it for monotonicity
-		workingEvents = append([]Event{newEvent}, workingEvents...)
 	}
 
 	// Remove duplicates of paths in processedBatch from current events
@@ -581,14 +588,15 @@ func (rf *Recentfile) ensureMonotonic(epoch Epoch, events []Event) Epoch {
 
 // sortEventsByEpoch sorts events by epoch descending (in-place).
 func (rf *Recentfile) sortEventsByEpoch(events []Event) {
-	// Simple insertion sort (good for mostly-sorted data)
-	for i := 1; i < len(events); i++ {
-		j := i
-		for j > 0 && EpochLt(events[j-1].Epoch, events[j].Epoch) {
-			events[j-1], events[j] = events[j], events[j-1]
-			j--
+	slices.SortFunc(events, func(a, b Event) int {
+		if EpochLt(a.Epoch, b.Epoch) {
+			return 1
 		}
-	}
+		if EpochGt(a.Epoch, b.Epoch) {
+			return -1
+		}
+		return 0
+	})
 }
 
 // truncate removes events outside the interval window.
