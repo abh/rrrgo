@@ -11,6 +11,10 @@ import (
 // Lock acquires an exclusive lock on the recentfile.
 // Uses directory-based locking (mkdir is atomic on POSIX systems).
 func (rf *Recentfile) Lock() error {
+	if rf.skipLock {
+		return nil
+	}
+
 	rf.mu.Lock()
 	if rf.locked {
 		rf.mu.Unlock()
@@ -18,7 +22,7 @@ func (rf *Recentfile) Lock() error {
 	}
 	rf.mu.Unlock()
 
-	lockDir := rf.Rfile() + ".lock"
+	lockDir := rf.LockDir()
 	timeout := rf.lockTimeout
 	if timeout == 0 {
 		timeout = 600 * time.Second // Default 10 minutes
@@ -79,6 +83,10 @@ func (rf *Recentfile) Lock() error {
 
 // Unlock releases the lock on the recentfile.
 func (rf *Recentfile) Unlock() error {
+	if rf.skipLock {
+		return nil
+	}
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 

@@ -231,6 +231,15 @@ func (r *Recent) LoadAll() error {
 	return nil
 }
 
+// SetSkipLock disables file locking on all recentfiles in the collection.
+func (r *Recent) SetSkipLock(skip bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, rf := range r.recentfiles {
+		rf.SetSkipLock(skip)
+	}
+}
+
 // Verbose sets verbose logging.
 func (r *Recent) Verbose(v bool) {
 	r.mu.Lock()

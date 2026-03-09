@@ -38,6 +38,7 @@ type Recentfile struct {
 	done *Done
 
 	// Flags
+	skipLock   bool
 	verbose    bool
 	verboseLog string
 
@@ -161,6 +162,11 @@ func New(opts ...Option) *Recentfile {
 	rf.updateProducers()
 
 	return rf
+}
+
+// LockDir returns the path to the lock directory for this recentfile.
+func (rf *Recentfile) LockDir() string {
+	return rf.Rfile() + ".lock"
 }
 
 // Rfile returns the full path to this recentfile.
@@ -365,6 +371,7 @@ func (rf *Recentfile) SparseClone() *Recentfile {
 		filenameRoot:     rf.filenameRoot,
 		serializerSuffix: rf.serializerSuffix,
 		lockTimeout:      rf.lockTimeout,
+		skipLock:         rf.skipLock,
 		verbose:          rf.verbose,
 		verboseLog:       rf.verboseLog,
 		meta: MetaData{
@@ -392,6 +399,13 @@ func (rf *Recentfile) Done() *Done {
 // Verbose returns the verbose flag.
 func (rf *Recentfile) Verbose() bool {
 	return rf.verbose
+}
+
+// SetSkipLock disables file locking when set to true.
+// Safe for single-writer deployments where Go's internal mutex
+// handles goroutine concurrency.
+func (rf *Recentfile) SetSkipLock(skip bool) {
+	rf.skipLock = skip
 }
 
 // SetVerbose sets the verbose flag.

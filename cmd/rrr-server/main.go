@@ -45,6 +45,7 @@ type CLI struct {
 
 	SkipFsck   bool `help:"Skip startup integrity check."`
 	FsckRepair bool `help:"Auto-repair issues found during startup fsck."`
+	NoLock     bool `help:"Disable file locking (safe for single-writer deployments)."`
 
 	Verbose bool `short:"v" help:"Enable verbose logging."`
 
@@ -208,6 +209,19 @@ func run(ctx context.Context, cli *CLI, log *slog.Logger) error {
 	}
 
 	log.Info("recent collection loaded", "collection", rec.String())
+
+	if cli.NoLock {
+		log.Info("file locking disabled (--no-lock)")
+		rec.SetSkipLock(true)
+	}
+
+	// Clean up stale lock directories from previous crashes
+	for _, rf := range rec.Recentfiles() {
+		lockDir := rf.LockDir()
+		if err := os.RemoveAll(lockDir); err != nil {
+			log.Warn("failed to clean stale lock", "path", lockDir, "error", err)
+		}
+	}
 
 	// Run startup fsck (unless --skip-fsck)
 	if !cli.SkipFsck {
@@ -379,7 +393,6 @@ func createOrLoadRecent(localRoot, interval, format string, aggregator []string,
 
 	return rec, nil
 }
-
 
 // metricsReporter periodically reports watcher stats to Prometheus.
 func (s *server) metricsReporter(stop chan struct{}, done chan struct{}) {
