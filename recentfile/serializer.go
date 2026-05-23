@@ -157,6 +157,13 @@ func detectFormat(path string) (string, error) {
 // Write writes the recentfile atomically to disk.
 // Writes to a temporary file (.new), then renames to the target.
 func (rf *Recentfile) Write() error {
+	// Stamp this writer's Producers on every write, mirroring the Perl
+	// meta_data() behavior: the writing process always records itself and
+	// the current time, rather than inheriting whatever was read from disk.
+	rf.mu.Lock()
+	rf.updateProducers()
+	rf.mu.Unlock()
+
 	// Marshal the data
 	data, err := rf.Marshal()
 	if err != nil {

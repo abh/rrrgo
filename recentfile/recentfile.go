@@ -532,10 +532,7 @@ func (rf *Recentfile) BatchUpdate(batch []BatchItem) error {
 	// Update minmax
 	rf.updateMinmax()
 
-	// Update producers to reflect current Go implementation
-	rf.updateProducers()
-
-	// Write to disk
+	// Write to disk (Write stamps Producers for this writer)
 	rf.mu.Unlock()
 	if err := rf.Write(); err != nil {
 		rf.mu.Lock()

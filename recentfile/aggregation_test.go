@@ -195,6 +195,42 @@ func TestAggregate(t *testing.T) {
 	}
 }
 
+func TestAggregateStampsProducers(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	principal := New(
+		WithLocalRoot(tmpDir),
+		WithInterval("1h"),
+		WithAggregator([]string{"6h", "1d"}),
+	)
+
+	if err := principal.BatchUpdate([]BatchItem{{Path: "file1.txt", Type: "new"}}); err != nil {
+		t.Fatalf("BatchUpdate failed: %v", err)
+	}
+	if err := principal.Aggregate(true); err != nil {
+		t.Fatalf("Aggregate failed: %v", err)
+	}
+
+	// Every file the writer produces must carry a Producers block identifying
+	// this implementation, mirroring the Perl meta_data behavior.
+	for _, name := range []string{"RECENT-1h.yaml", "RECENT-6h.yaml", "RECENT-1d.yaml"} {
+		rf, err := NewFromFile(filepath.Join(tmpDir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if rf.meta.Producers == nil {
+			t.Errorf("%s: Producers is nil, want stamped", name)
+			continue
+		}
+		if _, ok := rf.meta.Producers["github.com/abh/rrrgo"]; !ok {
+			t.Errorf("%s: Producers missing github.com/abh/rrrgo key: %v", name, rf.meta.Producers)
+		}
+		if _, ok := rf.meta.Producers["time"]; !ok {
+			t.Errorf("%s: Producers missing time key: %v", name, rf.meta.Producers)
+		}
+	}
+}
+
 func TestAggregateNoAggregator(t *testing.T) {
 	tmpDir := t.TempDir()
 
