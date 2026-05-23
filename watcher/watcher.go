@@ -168,7 +168,7 @@ func New(rec *recent.Recent, opts ...Option) (*Watcher, error) {
 	w := &Watcher{
 		fsw:          fsw,
 		recent:       rec,
-		rootDir:      rec.LocalRoot(),
+		rootDir:      filepath.Clean(rec.LocalRoot()),
 		ignoredRx:    ignoredRx,
 		batchChan:    make(chan batchItem, 100000),
 		batchSize:    1000,
