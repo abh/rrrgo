@@ -263,6 +263,58 @@ func TestIgnoreRECENTFiles(t *testing.T) {
 	}
 }
 
+// TestTrackSubdirRECENTFiles verifies that RECENT-* files in subdirectories
+// are tracked as events. They are mirrored content (e.g. an upstream's own
+// RECENT files arriving under modules/ or authors/), not this server's
+// managed index files, so the rootdir-scoped ignore must not drop them.
+func TestTrackSubdirRECENTFiles(t *testing.T) {
+	rec, tmpDir := setupTestRecent(t)
+
+	// Pre-create subdirs before Start so the initial watchTree picks them up
+	// (avoids racing the Create-event -> add-watch path for the writes below).
+	for _, sub := range []string{"modules", "authors"} {
+		if err := os.MkdirAll(filepath.Join(tmpDir, sub), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", sub, err)
+		}
+	}
+
+	w, _ := New(rec)
+	w.Start()
+	defer w.Stop()
+
+	tracked := []string{
+		filepath.Join("modules", "RECENT-1h.yaml"),
+		filepath.Join("authors", "RECENT-6h.yaml"),
+	}
+	for _, rel := range tracked {
+		if err := os.WriteFile(filepath.Join(tmpDir, rel), []byte("test"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+
+	// A rootdir RECENT file must still be ignored.
+	if err := os.WriteFile(filepath.Join(tmpDir, "RECENT-6h.yaml"), []byte("test"), 0o644); err != nil {
+		t.Fatalf("write rootdir RECENT: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	w.flushBatch()
+
+	got := make(map[string]bool)
+	for _, e := range rec.PrincipalRecentfile().RecentEvents() {
+		got[e.Path] = true
+	}
+
+	for _, rel := range tracked {
+		if !got[rel] {
+			t.Errorf("expected event for subdir RECENT file %q, but it was not tracked", rel)
+		}
+	}
+	if got["RECENT-6h.yaml"] {
+		t.Errorf("rootdir RECENT-6h.yaml must be ignored, but it was tracked")
+	}
+}
+
 func TestBatchDeduplication(t *testing.T) {
 	rec, tmpDir := setupTestRecent(t)
 

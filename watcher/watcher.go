@@ -151,7 +151,14 @@ func New(rec *recent.Recent, opts ...Option) (*Watcher, error) {
 	// Create context
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Build ignore regex for RECENT files
+	// Build ignore regex for RECENT files. This matches the principal and
+	// every aggregated interval (RECENT-1h, RECENT-6h, ...), RECENT.recent,
+	// and their atomic-write/lock artifacts. It is only applied to files in
+	// rootDir (see Filter 2), matching the reference Perl rrr-server, which
+	// scopes its ignore to the watched rootdir. RECENT files are server-managed
+	// index files, not tree content, and are propagated downstream via the
+	// merged/minmax metadata + re-seed mechanism, not as events. Subdirectory
+	// RECENT-* files (e.g. modules/RECENT-*) are mirrored content and ARE tracked.
 	meta := rec.PrincipalRecentfile().Meta()
 	pattern := fmt.Sprintf(`^%s(-[0-9]*[smhdWMQYZ]%s(\.lock(/.*)?|\.new)?|\.recent)$`,
 		regexp.QuoteMeta(meta.Filenameroot),
@@ -350,8 +357,9 @@ func (w *Watcher) handleEvents(events []fsnotify.Event) {
 			continue
 		}
 
-		// Filter 2: Ignore RECENT files
-		if w.ignoredRx.MatchString(basename) {
+		// Filter 2: Ignore server-managed RECENT files in rootDir only.
+		// Subdirectory RECENT-* files are mirrored content and fall through.
+		if filepath.Dir(event.Name) == w.rootDir && w.ignoredRx.MatchString(basename) {
 			continue
 		}
 
@@ -424,8 +432,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 
-	// Filter 2: Ignore RECENT files
-	if w.ignoredRx.MatchString(basename) {
+	// Filter 2: Ignore server-managed RECENT files in rootDir only.
+	// Subdirectory RECENT-* files are mirrored content and fall through.
+	if filepath.Dir(event.Name) == w.rootDir && w.ignoredRx.MatchString(basename) {
 		return
 	}
 
